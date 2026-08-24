@@ -1,0 +1,50 @@
+{
+  "epoch": 1,
+  "verifiedAt": "2026-08-24",
+  "cluster": "devnet",
+  "rpcEndpoint": "https://api.devnet.solana.com",
+  "encryptGrpcUrl": "https://pre-alpha-dev-1.encrypt.ika-network.net:443",
+  "faucetUrl": null,
+  "networkKeyHex": "5555555555555555555555555555555555555555555555555555555555555555",
+  "fheTypeU64": 4,
+  "programs": {
+    "encrypt": "4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8",
+    "pcToken": "3QaXJefrZ5K2nPWUfQwhbqUVMc1azSZT4MzU2hTfQV8C",
+    "pcSwap": "C3FYxXn15CMfimyrPU5FdwjyuMwvjVuB9zUPShL9eEMv"
+  },
+  "sides": {
+    "USDC": {
+      "decimals": 6,
+      "splMint": "AHfy9KyJLQMCS6mjcoUvvFgUqKr6HKoywee2mdpBpwa4",
+      "pcMint": "6CXh4GJMSd8d3PAYCqsAYyK25prbTH1LAQiusg1BZkAH",
+      "pcMintAuthority": "G1zjvpQwg9LycZXPCuYN4kxsSNQBMzsXKz9bMz6GkJGD",
+      "vault": "5KDQ5YZbDMregqrWpwkqi4dCRU4yqbSCYFngXgdp5Nep",
+      "vaultAta": "DcBz3thrap7j5QiQA8iaEWZu5p9wfcuz49QU1nFTvs9f"
+    },
+    "DOGE": {
+      "decimals": 6,
+      "splMint": "DHoyYsraopt627rYMgaweGYpm3rQkXXGWL6AW3EZpjon",
+      "pcMint": "3pvtAYbteZJWkia5gg8yMSRvFcUfaPjcwoK4LKw274Fn",
+      "pcMintAuthority": "ms9YhtEZPVBdXDwbCswDQc1m7GkrdtiLHF3TzD9SVdH",
+      "vault": "GSTAGfDfEhiCuBpzDpTZwbj2XSyZRwbp1Qtq3qudf61S",
+      "vaultAta": "2hcPj5doJfYm2UwQPo4hGVUAd5jY6zwrcyxqcSaPg5Uh"
+    }
+  },
+  "pool": {
+    "address": "4f9qJbkX1jkHgzZMVC8eRfQFuPUokf1hZn7rDsYZezWB",
+    "sideA": "USDC",
+    "sideB": "DOGE",
+    "vaultAccountA": "3mX9fEr4uZDF2mUALxM3aSVVmgdFYXPdotXSkZ9PLhsF",
+    "vaultAccountB": "7BEzSH2GhUVyvxuokrtDG7WdvgDk7hA7CLb73ZCEakRc",
+    "vaultBalanceCtA": "6WXyJ61jV7VW2M5LsrkT4JUzmaJCt3WeSvkTbNbKx96A",
+    "vaultBalanceCtB": "EdhnbDApUHZ4NMYb6gu8KuoKGyi8Z165mcuJbXuRrojx",
+    "reserveCtA": "25ir3Q29HsWsFRxyruzraDJb3seGry25GptzZe8aCuho",
+    "reserveCtB": "JAZB6uVEJMirzUoZqKvGQE59aoYNUsFjpmgpBtpW1caV"
+  },
+  "layout": {
+    "pcAccountBalanceCtOffset": [64, 96],
+    "ciphertextDigestOffset": [2, 34],
+    "ciphertextVerifiedFlagByte": 99,
+    "encryptConfigFeeVaultOffset": [100, 132]
+  }
+}
