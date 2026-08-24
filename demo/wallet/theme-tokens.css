@@ -1,0 +1,14 @@
+/* Tailwind v4 theme tokens the wallet demo relies on. wd-* = "wallet demo" palette:
+   a neutral Phantom/Solflare-class look, no real wallet's branding.
+   Paste after `@import "tailwindcss"` in your app CSS. */
+@theme {
+  --color-wd-bg:     #0E0F13;
+  --color-wd-card:   #16181F;
+  --color-wd-elev:   #1D2029;
+  --color-wd-line:   #2A2E3A;
+  --color-wd-text:   #F2F3F7;
+  --color-wd-sub:    #9298AC;
+  --color-wd-accent: #5B8CFF;
+  --color-wd-up:     #34D399;
+  --color-wd-down:   #F87171;
+}

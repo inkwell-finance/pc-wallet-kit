@@ -1,6 +1,6 @@
 # pc-token / pc-swap — Wallet Integration, LLM-complete bundle (Solana devnet)
 
-> This single file is everything an engineer or coding agent needs to implement wrap, reveal, send, swap and unwrap against the pc-token and pc-swap programs deployed on Solana devnet. Part 1 is the human guide. Part 2 is the verbatim reference source: the browser-tested client, the Encrypt gRPC-web client closure, the upstream instruction builders, and both on-chain programs. Addresses in Part 1 were verified live on 2026-08-24. Encrypt source pin: `7d34bb1f5889045a21fb428a96dd667aabd78157`. Repository: https://github.com/inkwell-finance/pc-wallet-kit.
+> This single file is everything an engineer or coding agent needs to implement wrap, reveal, send, swap and unwrap against the pc-token and pc-swap programs deployed on Solana devnet. Part 1 is the human guide. Part 2 is the verbatim reference source: the browser-tested client, the Encrypt gRPC-web client closure, the upstream instruction builders, and both on-chain programs. Part 3 is the guided mock-wallet demo (UX patterns only; mock data). Addresses in Part 1 were verified live on 2026-08-24. Encrypt source pin: `7d34bb1f5889045a21fb428a96dd667aabd78157`. Repository: https://github.com/inkwell-finance/pc-wallet-kit.
 >
 > Instructions for an agent: read Part 1 fully first — §1 lists what is NOT true yet (pre-alpha, plaintext, devnet-only, silent no-ops). Implement against the account layouts and discriminators in Part 1; use Part 2 to resolve any ambiguity — the on-chain `lib.rs` files are authoritative over the guide. Do not depend on the `@encrypt.xyz/pre-alpha-solana-client` npm package; vendor the three files in §2.4–2.6 instead and add `@protobuf-ts/runtime`, `@protobuf-ts/runtime-rpc`, `@protobuf-ts/grpcweb-transport` as dependencies. Preserve partial signatures from ephemeral keypairs when the wallet signs. Never report a send or swap as successful from a confirmed signature alone; reveal afterwards.
 
@@ -4887,5 +4887,2030 @@ mod tests {
         assert_eq!(pg.header().num_inputs(), 5);
         assert_eq!(pg.header().num_outputs(), 6);
     }
+}
+```
+
+---
+
+# Part 3 — Guided wallet demo (mock UI, interaction reference)
+
+
+## `demo/wallet/WalletDemo.tsx`
+
+```tsx
+/**
+ * Wallet View — /wallet
+ *
+ * Shows what pc-token + pc-swap feel like from inside a consumer wallet:
+ * a phone-framed mock wallet (Phantom/Solflare-class layout, no real
+ * wallet's branding) with the flows a wallet partner would ship —
+ * private balance display with local viewing-key reveal, wrap as the
+ * public ramp, estimate-plus-floor swap, sealed activity.
+ *
+ * Everything in the frame is mock data. The annotation panel narrates
+ * what the rail is actually doing at each step, keeping the honest-claims
+ * discipline (we hide how much, not that; no firm quotes on encrypted
+ * reserves; pre-alpha disclaimer per SOUL.md §108).
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Helmet } from 'react-helmet-async';
+import { Sparkles } from 'lucide-react';
+import { cn } from '@/lib/cn';
+import { PreAlphaDisclaimer } from '@/components/swap/Disclaimer';
+import { WalletFrame, type WalletFrameHandle } from '@/components/wallet-demo/WalletFrame';
+import {
+  SpotlightOverlay,
+  TourTooltip,
+  useFrameHost,
+  type SpotRect,
+} from '@/components/wallet-demo/GuidedTour';
+import { TOUR_STEPS } from '@/components/wallet-demo/tourSteps';
+import { WALLET_THEMES, type WalletThemeId } from '@/components/wallet-demo/theme';
+import type { ScreenId } from '@/components/wallet-demo/data';
+
+type Context = ScreenId | 'wrap' | 'confirm';
+
+const ANNOTATIONS: Record<Context, { headline: string; points: string[] }> = {
+  home: {
+    headline: 'The chain never shows a number.',
+    points: [
+      'Balances are ciphertexts. Your viewing key decrypts them on your screen, nowhere else.',
+      'No wallet ships this today. It is the gap on the Foundation’s own roadmap.',
+    ],
+  },
+  swap: {
+    headline: 'No firm quote. An estimate, plus a floor you choose.',
+    points: [
+      'An exact quote would leak the encrypted reserves.',
+      'The floor is enforced inside the encrypted math. Below it, the swap fails whole.',
+    ],
+  },
+  activity: {
+    headline: 'Observers see that you traded. Never how much.',
+    points: [
+      'Wrap rows show amounts. The ramp is public by design.',
+      'Swap amounts, balances, and reserves stay sealed.',
+    ],
+  },
+  save: {
+    headline: 'Yield with no payout. The rate rises instead.',
+    points: [
+      'Treasury rewards arrive as one aggregate vault transfer, streamed by Solomon.',
+      'Your shares never move; the public rate climbs. A payout would reveal your balance. A rate reveals no one.',
+    ],
+  },
+  wrap: {
+    headline: 'The ramp is the only public step.',
+    points: [
+      'KYC lives with the issuer, at mint and redeem.',
+      'After settlement, even the issuer can’t read your balance.',
+    ],
+  },
+  confirm: {
+    headline: 'One atomic transaction.',
+    points: [
+      'Debit receipt, encrypted curve, payout. No partial state, no mempool window.',
+      'A lying counterparty gets a uniform no-op.',
+    ],
+  },
+};
+
+export default function WalletDemo() {
+  const [context, setContext] = useState<Context>('home');
+  const [themeId, setThemeId] = useState<WalletThemeId>('neutral');
+  const [tourStep, setTourStep] = useState<number | null>(null);
+  const [spotRect, setSpotRect] = useState<SpotRect | null>(null);
+  const frameRef = useRef<WalletFrameHandle>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const frameHost = useFrameHost(themeId);
+  const annotation = ANNOTATIONS[context];
+  const touring = tourStep !== null;
+
+  const enterStep = useCallback((index: number) => {
+    const step = TOUR_STEPS[index];
+    if (step.action) frameRef.current?.run(step.action);
+    setTourStep(index);
+  }, []);
+
+  const exitTour = useCallback(() => {
+    setTourStep(null);
+    setSpotRect(null);
+    frameRef.current?.run('home');
+  }, []);
+
+  useEffect(() => {
+    if (touring) exitTour();
+    // Intentionally only when the theme changes: a theme switch remounts the
+    // frame, which orphans the tour's portal host.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [themeId]);
+
+  useEffect(() => {
+    if (tourStep === null || !frameHost) return;
+    const step = TOUR_STEPS[tourStep];
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        step.advance === 'click' &&
+        step.clickTarget &&
+        target.closest(`[data-tour-click="${step.clickTarget}"]`)
+      ) {
+        window.setTimeout(() => enterStep(Math.min(tourStep + 1, TOUR_STEPS.length - 1)), 80);
+        return;
+      }
+      e.stopPropagation();
+      e.preventDefault();
+      frameHost.dispatchEvent(new CustomEvent('wd-tour-nudge'));
+    };
+    frameHost.addEventListener('click', handler, true);
+    return () => frameHost.removeEventListener('click', handler, true);
+  }, [tourStep, frameHost]);
+
+  return (
+    <div className="mx-auto max-w-6xl px-6 pb-20 pt-10">
+      <Helmet>
+        <title>Wallet View — Dagon</title>
+        <meta
+          name="description"
+          content="What pc-token and pc-swap feel like inside a consumer wallet: private balances, viewing-key reveal, and honest encrypted-swap quotes."
+        />
+      </Helmet>
+
+      <PreAlphaDisclaimer />
+
+      <header className="mb-10 mt-8 max-w-3xl">
+        <p className="font-body text-[10px] uppercase tracking-[0.4em] text-mist">Wallet view</p>
+        <h1 className="mt-3 font-headline text-4xl italic text-pearl md:text-5xl">
+          What a private dollar feels like in your pocket.
+        </h1>
+        <p className="mt-4 font-body text-base leading-relaxed text-silk">
+          The swap-demo primitives, met the way an end user meets them: inside a wallet. Every
+          figure is illustrative.
+        </p>
+      </header>
+
+      <div className="mb-8 flex flex-wrap items-center gap-3">
+        <span id="wd-style-label" className="font-body text-[10px] uppercase tracking-[0.35em] text-mist">
+          Style study
+        </span>
+        <div role="group" aria-labelledby="wd-style-label" className="flex border border-tide/60">
+          {(Object.keys(WALLET_THEMES) as WalletThemeId[]).map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setThemeId(id)}
+              aria-pressed={themeId === id}
+              className={cn(
+                'px-4 py-2.5 font-body text-[10px] uppercase tracking-[0.25em] transition-colors',
+                'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-glint',
+                themeId === id ? 'bg-pearl text-void' : 'text-silk hover:text-pearl',
+              )}
+            >
+              {WALLET_THEMES[id].label}
+            </button>
+          ))}
+        </div>
+        <span className="font-body text-[10px] text-mist">
+          Style studies. No affiliation, no logos.
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => frameRef.current?.run('reset')}
+            disabled={touring}
+            className={cn(
+              'border border-tide px-4 py-2.5 font-body text-[10px] uppercase tracking-[0.25em]',
+              'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-glint',
+              touring ? 'cursor-not-allowed text-mist/50' : 'text-silk hover:text-pearl',
+            )}
+          >
+            Reset demo
+          </button>
+          <button
+            type="button"
+            onClick={() => (touring ? exitTour() : enterStep(0))}
+            className={cn(
+              'flex items-center gap-2 px-5 py-2.5 font-body text-[10px] uppercase tracking-[0.25em]',
+              'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-glint',
+              touring
+                ? 'border border-tide text-silk hover:text-pearl'
+                : 'bg-pearl text-void hover:bg-glint',
+            )}
+          >
+            <Sparkles className="h-3.5 w-3.5" aria-hidden />
+            {touring ? 'End tour' : 'Guided tour'}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div ref={wrapperRef} className="relative">
+          <WalletFrame
+            ref={frameRef}
+            key={themeId}
+            themeId={themeId}
+            locked={tourStep !== null}
+            onContextChange={setContext}
+          />
+
+          {tourStep !== null && (
+            <>
+              <SpotlightOverlay stepIndex={tourStep} frameHost={frameHost} onRect={setSpotRect} />
+              <TourTooltip
+                stepIndex={tourStep}
+                rect={spotRect}
+                frameHost={frameHost}
+                wrapperRef={wrapperRef}
+                onNext={() => tourStep < TOUR_STEPS.length - 1 && enterStep(tourStep + 1)}
+                onBack={() => tourStep > 0 && enterStep(tourStep - 1)}
+                onExit={exitTour}
+              />
+            </>
+          )}
+        </div>
+
+        <aside className="lg:sticky lg:top-24" aria-live="polite">
+          {tourStep === null && (
+            <>
+              <div className="border border-tide/60 bg-abyss p-6">
+                <p className="font-body text-[10px] uppercase tracking-[0.35em] text-mist">
+                  What's actually happening
+                </p>
+                <h2 className="mt-3 font-headline text-3xl italic leading-snug text-pearl">
+                  {annotation.headline}
+                </h2>
+                <div className="mt-5 flex flex-col gap-3">
+                  {annotation.points.map((p) => (
+                    <p key={p.slice(0, 24)} className="font-body text-sm leading-relaxed text-silk">
+                      {p}
+                    </p>
+                  ))}
+                </div>
+              </div>
+              <p className="mt-4 font-body text-[10px] text-mist">
+                Tap through the phone. This panel follows. Or take the guided tour above.
+              </p>
+            </>
+          )}
+        </aside>
+      </div>
+    </div>
+  );
+}
+```
+
+## `demo/wallet/components/wallet-demo/WalletFrame.tsx`
+
+```tsx
+/**
+ * WalletFrame — the phone-shaped mock wallet.
+ *
+ * A consumer-wallet layout rendered entirely from mock data, showing what
+ * pc-token + pc-swap feel like from inside a wallet: hidden private
+ * balances with a local viewing-key reveal, wrap as the public ramp leg,
+ * and a swap whose quote is estimate + guaranteed floor.
+ *
+ * Three style studies (see theme.ts): a neutral look plus Phantom-style
+ * and Solflare-style variants calibrated against real screenshots —
+ * palette and layout grammar only, no real wallet's branding, name, or
+ * logo. All figures illustrative; pre-alpha rail underneath.
+ */
+
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { ArrowDownUp, ArrowDown, Check, Clock3, Download, Lock, PiggyBank, RefreshCw, Send, Shield } from 'lucide-react';
+import gsap from 'gsap';
+import { cn } from '@/lib/cn';
+import {
+  estimateOut,
+  floorOut,
+  fmtAmount,
+  fmtUsd,
+  INITIAL_ACTIVITY,
+  INITIAL_BALANCES,
+  PRIVATE_META,
+  PUBLIC_META,
+  PYTH_MID,
+  SAVINGS_DEPOSIT,
+  SAVINGS_RATE_START,
+  SAVINGS_RATE_WEEK,
+  WRAP_AMOUNT,
+  YPCUSD_META,
+  type ActivityEntry,
+  type Balances,
+  type DemoToken,
+  type ScreenId,
+  type SheetId,
+} from './data';
+import { ChangeTag, InfoRow, PrimaryButton, SheetShell, TokenGlyph, TokenRow } from './bits';
+import { WALLET_THEMES, WalletThemeProvider, type WalletThemeId } from './theme';
+import type { TourAction } from './tourSteps';
+
+export interface WalletFrameProps {
+  themeId?: WalletThemeId;
+  /** Freeze the inner scroll surface (used while the guided tour runs). */
+  locked?: boolean;
+  onContextChange?: (context: ScreenId | 'wrap' | 'confirm') => void;
+}
+
+export interface WalletFrameHandle {
+  run: (action: TourAction) => void;
+}
+
+interface RevealState {
+  revealed: boolean;
+  decrypting: boolean;
+}
+
+function SaveValue({ value }: { value: number }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const prev = useRef(value);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const from = prev.current;
+    prev.current = value;
+    if (from === value || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      el.textContent = fmtUsd(value);
+      return;
+    }
+    const obj = { v: from };
+    const tween = gsap.to(obj, {
+      v: value,
+      duration: 1.4,
+      ease: 'power2.out',
+      onUpdate: () => {
+        el.textContent = fmtUsd(obj.v);
+      },
+    });
+    return () => {
+      tween.kill();
+    };
+  }, [value]);
+  return (
+    <span ref={ref} className="font-mono text-3xl font-medium tabular-nums text-wd-text">
+      {fmtUsd(value)}
+    </span>
+  );
+}
+
+export const WalletFrame = forwardRef<WalletFrameHandle, WalletFrameProps>(function WalletFrame(
+  { themeId = 'neutral', locked = false, onContextChange }: WalletFrameProps,
+  ref,
+) {
+  const theme = WALLET_THEMES[themeId];
+  const [screen, setScreen] = useState<ScreenId>('home');
+  const [sheet, setSheet] = useState<SheetId>('none');
+  const [reveals, setReveals] = useState<Record<string, RevealState>>({});
+  const [swapAmount, setSwapAmount] = useState('100');
+  const [tolerance, setTolerance] = useState(1);
+  const [activity, setActivity] = useState<ActivityEntry[]>(INITIAL_ACTIVITY);
+  const [balances, setBalances] = useState<Balances>(INITIAL_BALANCES);
+  const [savings, setSavings] = useState({ shares: 0, rate: SAVINGS_RATE_START });
+  const [settledWeek, setSettledWeek] = useState(false);
+  const timers = useRef<number[]>([]);
+
+  const publicTokens: DemoToken[] = PUBLIC_META.map((m) => ({
+    ...m,
+    amount: balances[m.symbol as 'SOL' | 'USDC'],
+  }));
+  const privateTokens: DemoToken[] = [
+    ...PRIVATE_META.map((m) => ({ ...m, amount: balances[m.symbol as 'pcUSD' | 'pcDOGE'] })),
+    ...(savings.shares > 0
+      ? [{ ...YPCUSD_META, amount: savings.shares, usdPrice: savings.rate }]
+      : []),
+  ];
+
+  useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
+
+  useEffect(() => {
+    if (sheet === 'wrap') onContextChange?.('wrap');
+    else if (sheet === 'confirm' || sheet === 'success') onContextChange?.('confirm');
+    else onContextChange?.(screen);
+  }, [screen, sheet, onContextChange]);
+
+  const toggleReveal = (symbol: string) => {
+    const current = reveals[symbol];
+    if (current?.revealed) {
+      setReveals((r) => ({ ...r, [symbol]: { revealed: false, decrypting: false } }));
+      return;
+    }
+    setReveals((r) => ({ ...r, [symbol]: { revealed: false, decrypting: true } }));
+    timers.current.push(
+      window.setTimeout(() => {
+        setReveals((r) => ({ ...r, [symbol]: { revealed: true, decrypting: false } }));
+      }, 900),
+    );
+  };
+
+  const anyRevealed = privateTokens.some((t) => reveals[t.symbol]?.revealed);
+  const publicUsd = publicTokens.reduce((s, t) => s + t.amount * t.usdPrice, 0);
+  const revealedUsd = privateTokens.reduce(
+    (s, t) => s + (reveals[t.symbol]?.revealed ? t.amount * t.usdPrice : 0),
+    0,
+  );
+
+  const amountIn = Number.parseFloat(swapAmount) || 0;
+  const validAmount = amountIn > 0 && amountIn <= balances.pcUSD;
+
+  const executeSwap = () => {
+    setBalances((b) => ({
+      ...b,
+      pcUSD: b.pcUSD - amountIn,
+      pcDOGE: b.pcDOGE + estimateOut(amountIn),
+    }));
+    setSheet('success');
+    setActivity((a) => [
+      {
+        id: `s${a.length + 1}`,
+        kind: 'swap',
+        title: 'Private swap',
+        detail: 'pcUSD → pcDOGE · sealed',
+        amount: 'Amount hidden',
+        sealed: true,
+      },
+      ...a,
+    ]);
+  };
+
+  const confirmWrap = () => {
+    setBalances((b) => ({ ...b, USDC: b.USDC - WRAP_AMOUNT, pcUSD: b.pcUSD + WRAP_AMOUNT }));
+    setSheet('wrapSuccess');
+    setActivity((a) => [
+      {
+        id: `w${a.length + 1}`,
+        kind: 'wrap',
+        title: 'Wrapped to pcUSD',
+        detail: 'USDC → pcUSD · public ramp leg',
+        amount: `${WRAP_AMOUNT.toFixed(2)} USDC`,
+      },
+      ...a,
+    ]);
+  };
+
+  const confirmDeposit = () => {
+    setBalances((b) => ({ ...b, pcUSD: b.pcUSD - SAVINGS_DEPOSIT }));
+    setSavings((s) => ({ ...s, shares: s.shares + SAVINGS_DEPOSIT / s.rate }));
+    setSheet('none');
+    setActivity((a) => [
+      {
+        id: `d${a.length + 1}`,
+        kind: 'wrap',
+        title: 'Savings deposit',
+        detail: 'pcUSD → ypcUSD · shares sealed',
+        amount: 'Amount hidden',
+        sealed: true,
+      },
+      ...a,
+    ]);
+  };
+
+  const settleWeek = () => {
+    setSavings((s) => ({ ...s, rate: SAVINGS_RATE_WEEK }));
+    setSettledWeek(true);
+    setActivity((a) => [
+      {
+        id: `y${a.length + 1}`,
+        kind: 'receive',
+        title: 'Yield settled',
+        detail: `Vault aggregate · rate → ${SAVINGS_RATE_WEEK.toFixed(4)}`,
+        amount: '+0.12% rate',
+      },
+      ...a,
+    ]);
+  };
+
+  useImperativeHandle(ref, () => ({
+    run: (action: TourAction) => {
+      switch (action) {
+        case 'home':
+          setScreen('home');
+          setSheet('none');
+          break;
+        case 'close-sheet-home':
+          setSheet('none');
+          setScreen('home');
+          break;
+        case 'reset':
+          setScreen('home');
+          setSheet('none');
+          setReveals({});
+          setSwapAmount('100');
+          setTolerance(1);
+          setActivity(INITIAL_ACTIVITY);
+          setBalances(INITIAL_BALANCES);
+          setSavings({ shares: 0, rate: SAVINGS_RATE_START });
+          setSettledWeek(false);
+          break;
+      }
+    },
+  }));
+
+  const listWrap = (children: React.ReactNode, aux?: React.ReactNode) => {
+    if (theme.listStyle === 'container') {
+      return <div className={cn('mx-4 bg-wd-card', theme.card)}>{aux}{children}</div>;
+    }
+    if (theme.listStyle === 'cards') {
+      return <div className="mx-4 flex flex-col gap-2">{aux}{children}</div>;
+    }
+    return <div className="mx-2">{aux}{children}</div>;
+  };
+
+  const rowShell = (key: string, row: React.ReactNode) =>
+    theme.listStyle === 'cards' ? (
+      <div key={key} className={cn('bg-wd-card', theme.card)}>{row}</div>
+    ) : (
+      <div key={key}>{row}</div>
+    );
+
+  return (
+    <WalletThemeProvider value={theme}>
+      <div
+        data-wd-frame
+        className={cn(
+          'relative mx-auto flex h-[740px] w-[340px] flex-col overflow-hidden rounded-[2.5rem] border border-wd-line bg-wd-bg shadow-2xl shadow-black/60 ring-8 ring-black',
+          theme.frameClass,
+        )}
+      >
+        <div className="flex items-center justify-between px-5 pt-5 pb-3">
+          <button
+            type="button"
+            className="flex items-center gap-2 rounded-full bg-wd-card px-3 py-1.5 text-xs font-medium text-wd-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent"
+          >
+            <span aria-hidden className="h-4 w-4 rounded-full bg-gradient-to-br from-wd-accent to-wd-up" />
+            {theme.accountName}
+          </button>
+          <span className="font-mono text-[10px] text-wd-sub">devnet · demo</span>
+        </div>
+
+        <div className={cn('relative flex-1', locked ? 'overflow-hidden' : 'overflow-y-auto')}>
+          {screen === 'home' && (
+            <div>
+              <div data-tour="total" className={cn('px-5 pb-2 pt-2', theme.totalAlign === 'left' ? 'text-left' : 'text-center')}>
+                <div className="font-mono text-3xl font-medium tabular-nums text-wd-text">
+                  {fmtUsd(publicUsd + revealedUsd)}
+                </div>
+                <div
+                  className={cn(
+                    'mt-1.5 flex items-center gap-1.5 text-xs text-wd-sub',
+                    theme.totalAlign === 'left' ? 'justify-start' : 'justify-center',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'flex items-center gap-1.5',
+                      theme.changePill && 'rounded-md bg-wd-up/10 px-2 py-0.5 text-wd-up',
+                    )}
+                  >
+                    <Lock className={cn('h-3 w-3', theme.changePill ? 'text-wd-up' : 'text-wd-accent')} aria-hidden />
+                    {anyRevealed ? 'includes revealed private balances' : '+ 2 private balances (hidden)'}
+                  </span>
+                </div>
+              </div>
+
+              <div
+                className={cn(
+                  'px-4 py-4',
+                  theme.actionStyle === 'square-card'
+                    ? 'grid grid-cols-4 gap-2'
+                    : 'flex items-start justify-center gap-5 px-5',
+                )}
+              >
+                {[
+                  { icon: Download, label: 'Receive' },
+                  { icon: Send, label: 'Send' },
+                  { icon: ArrowDownUp, label: 'Swap', onClick: () => setScreen('swap') },
+                  { icon: RefreshCw, label: 'Wrap', onClick: () => setSheet('wrap') },
+                ].map(({ icon: Icon, label, onClick }) => {
+                  const tourAttrs =
+                    label === 'Wrap'
+                      ? { 'data-tour': 'action-wrap', 'data-tour-click': 'action-wrap' }
+                      : {};
+                  return theme.actionStyle === 'square-card' ? (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={onClick}
+                      {...tourAttrs}
+                      className={cn(
+                        'flex flex-col items-center gap-1.5 bg-wd-card py-3',
+                        theme.card,
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent',
+                      )}
+                    >
+                      <Icon className="h-5 w-5 text-wd-accent" aria-hidden />
+                      <span className="text-[11px] text-wd-sub">{label}</span>
+                    </button>
+                  ) : (
+                    <div key={label} className="flex flex-col items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={onClick}
+                        {...tourAttrs}
+                        className={cn(
+                          'flex h-12 w-12 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent',
+                          theme.actionStyle === 'circle-white'
+                            ? 'bg-wd-elev text-wd-text hover:brightness-125'
+                            : 'bg-wd-card text-wd-accent hover:bg-wd-elev',
+                        )}
+                        aria-label={label}
+                      >
+                        <Icon className="h-5 w-5" aria-hidden />
+                      </button>
+                      <span className="text-[11px] text-wd-sub">{label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {listWrap(
+                publicTokens.map((t) =>
+                  rowShell(t.symbol, <TokenRow token={t} revealed decrypting={false} />),
+                ),
+              )}
+
+              <div data-tour="private" className="mt-3 mb-4">
+                {listWrap(
+                  <>
+                    {privateTokens.map((t) =>
+                      rowShell(
+                        t.symbol,
+                        <div data-tour={t.symbol === 'pcUSD' ? 'reveal' : undefined}>
+                          <TokenRow
+                            token={t}
+                            revealed={Boolean(reveals[t.symbol]?.revealed)}
+                            decrypting={Boolean(reveals[t.symbol]?.decrypting)}
+                            onToggleReveal={() => toggleReveal(t.symbol)}
+                            eyeClickId={t.symbol === 'pcUSD' ? 'reveal-eye' : undefined}
+                          />
+                        </div>,
+                      ),
+                    )}
+                    <p className="px-4 pb-3 pt-1 text-[10px] leading-relaxed text-wd-sub">
+                      Encrypted on-chain. Even the issuer can't read them. Reveal decrypts locally
+                      with your viewing key; nothing leaves this device.
+                    </p>
+                  </>,
+                  <div className="flex items-center gap-1.5 px-4 pb-1 pt-3 text-[10px] font-medium uppercase tracking-widest text-wd-sub">
+                    <Shield className="h-3 w-3 text-wd-accent" aria-hidden />
+                    Private balances
+                  </div>,
+                )}
+              </div>
+            </div>
+          )}
+
+          {screen === 'swap' && (
+            <div className="flex flex-col gap-3 px-4 pt-2">
+              <div className={cn('bg-wd-card p-4', theme.card)}>
+                <div className="mb-2 flex items-center justify-between text-xs text-wd-sub">
+                  <span>You pay</span>
+                  <span className="font-mono tabular-nums">
+                    Balance: {reveals.pcUSD?.revealed ? fmtAmount(balances.pcUSD) : '••••'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <TokenGlyph token={privateTokens[0]} size="sm" />
+                  <span className="text-sm font-medium text-wd-text">pcUSD</span>
+                  <label className="sr-only" htmlFor="wd-swap-amount">
+                    Amount of pcUSD to swap
+                  </label>
+                  <input
+                    id="wd-swap-amount"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={swapAmount}
+                    onChange={(e) => setSwapAmount(e.target.value.replace(/[^0-9.]/g, ''))}
+                    className="min-w-0 flex-1 bg-transparent text-right font-mono text-xl tabular-nums text-wd-text focus-visible:outline-none"
+                    aria-invalid={!validAmount}
+                  />
+                </div>
+              </div>
+
+              <div className="relative -my-4 flex justify-center" aria-hidden>
+                <span className="z-10 flex h-8 w-8 items-center justify-center rounded-full border border-wd-line bg-wd-elev text-wd-sub">
+                  <ArrowDown className="h-4 w-4" />
+                </span>
+              </div>
+
+              <div className={cn('bg-wd-card p-4', theme.card)}>
+                <div className="mb-2 text-xs text-wd-sub">You receive (estimated)</div>
+                <div className="flex items-center gap-3">
+                  <TokenGlyph token={privateTokens[1]} size="sm" />
+                  <span className="text-sm font-medium text-wd-text">pcDOGE</span>
+                  <span className="flex-1 text-right font-mono text-xl tabular-nums text-wd-text">
+                    ≈ {validAmount ? fmtAmount(estimateOut(amountIn)) : '—'}
+                  </span>
+                </div>
+              </div>
+
+              <div data-tour="quote" className={cn('border border-wd-line bg-wd-bg p-4', theme.card)}>
+                <InfoRow label="Reference price (Pyth)" value={`1 pcUSD ≈ ${PYTH_MID} pcDOGE`} dim />
+                <InfoRow
+                  label="Guaranteed minimum"
+                  value={validAmount ? `${fmtAmount(floorOut(amountIn, tolerance))} pcDOGE` : '—'}
+                />
+                <div className="mt-2 flex items-center gap-2">
+                  <span id="wd-tolerance-label" className="text-xs text-wd-sub">
+                    Tolerance
+                  </span>
+                  <div role="group" aria-labelledby="wd-tolerance-label" className="flex gap-1.5">
+                    {[0.5, 1, 2].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => setTolerance(pct)}
+                        aria-pressed={tolerance === pct}
+                        className={cn(
+                          'rounded-full px-3 py-2 font-mono text-[11px]',
+                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent',
+                          tolerance === pct
+                            ? 'bg-wd-accent/20 text-wd-accent ring-1 ring-wd-accent/50'
+                            : 'bg-wd-elev text-wd-sub hover:text-wd-text',
+                        )}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p className="mt-3 text-[10px] leading-relaxed text-wd-sub">
+                  Reserves are encrypted, so there is no firm quote. The estimate is Pyth-anchored;
+                  the minimum is enforced inside the encrypted swap. Below the floor, it fails
+                  whole.
+                </p>
+              </div>
+
+              <div data-tour="review" data-tour-click="review">
+                <PrimaryButton disabled={!validAmount} onClick={() => setSheet('confirm')}>
+                  {validAmount ? 'Review swap' : 'Enter an amount'}
+                </PrimaryButton>
+              </div>
+              <p className="pb-3 text-center text-[10px] text-wd-sub">
+                Observers see that you swapped. Never how much.
+              </p>
+            </div>
+          )}
+
+          {screen === 'save' && (
+            <div className="flex flex-col gap-3 px-4 pt-2">
+              <div data-tour="savevalue" className={cn('bg-wd-card p-4', theme.card)}>
+                <div className="mb-2 flex items-center gap-1.5 text-xs text-wd-sub">
+                  <Lock className="h-3 w-3 text-wd-accent" aria-hidden />
+                  Savings value
+                </div>
+                {savings.shares === 0 ? (
+                  <>
+                    <div className="font-mono text-3xl font-medium text-wd-sub">—</div>
+                    <p className="mt-1 text-[10px] text-wd-sub">No savings yet.</p>
+                  </>
+                ) : (
+                  <>
+                    <SaveValue value={savings.shares * savings.rate} />
+                    <p className="mt-1 font-mono text-[10px] tabular-nums text-wd-sub">
+                      {fmtAmount(savings.shares)} ypcUSD shares · decrypted locally
+                    </p>
+                  </>
+                )}
+              </div>
+
+              <div data-tour="saveinfo" className={cn('border border-wd-line bg-wd-bg p-4', theme.card)}>
+                <InfoRow label="Redemption rate" value={`1 ypcUSD = ${savings.rate.toFixed(4)} pcUSD`} />
+                <InfoRow label="Past week" value={settledWeek ? '+0.12%' : '—'} dim={!settledWeek} />
+                <InfoRow label="Backing" value="Short-dated treasuries" dim />
+                <InfoRow label="Streamed by" value="Solomon · issued via Bridge" dim />
+                <p className="mt-3 text-[10px] leading-relaxed text-wd-sub">
+                  The rate is public and only rises. Your share count stays sealed. Rewards are
+                  variable and not guaranteed.
+                </p>
+              </div>
+
+              {savings.shares === 0 ? (
+                <div data-tour="deposit" data-tour-click="deposit">
+                  <PrimaryButton onClick={() => setSheet('deposit')}>Deposit</PrimaryButton>
+                </div>
+              ) : (
+                <div data-tour="settle" data-tour-click="settle">
+                  <button
+                    type="button"
+                    onClick={settleWeek}
+                    disabled={settledWeek}
+                    className={cn(
+                      'w-full border border-wd-line py-3.5 text-sm font-semibold text-wd-text transition-colors',
+                      theme.cta,
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent',
+                      settledWeek
+                        ? 'cursor-not-allowed text-wd-sub'
+                        : 'hover:border-wd-accent hover:text-wd-accent',
+                    )}
+                  >
+                    {settledWeek ? 'Week settled' : 'Run a week (simulate settlement)'}
+                  </button>
+                </div>
+              )}
+              <p className="pb-3 text-center text-[10px] text-wd-sub">
+                Yield arrives as one aggregate vault transfer. Never as a payout to you.
+              </p>
+            </div>
+          )}
+
+          {screen === 'activity' && (
+            <div data-tour="activity" className="mt-2 mb-4">
+              {listWrap(
+                <>
+                  {activity.map((e) =>
+                    rowShell(
+                      e.id,
+                      <div className="flex items-center gap-3 px-4 py-3">
+                        <span
+                          aria-hidden
+                          className={cn(
+                            'flex h-9 w-9 shrink-0 items-center justify-center rounded-full',
+                            e.sealed ? 'bg-wd-accent/15 text-wd-accent' : 'bg-wd-elev text-wd-sub',
+                          )}
+                        >
+                          {e.kind === 'swap' ? (
+                            <ArrowDownUp className="h-4 w-4" />
+                          ) : e.kind === 'wrap' ? (
+                            <RefreshCw className="h-4 w-4" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-wd-text">{e.title}</div>
+                          <div className="truncate text-xs text-wd-sub">{e.detail}</div>
+                        </div>
+                        <div
+                          className={cn(
+                            'flex items-center gap-1 font-mono text-xs tabular-nums',
+                            e.sealed ? 'text-wd-accent' : 'text-wd-text',
+                          )}
+                        >
+                          {e.sealed && <Lock className="h-3 w-3" aria-hidden />}
+                          {e.amount}
+                        </div>
+                      </div>,
+                    ),
+                  )}
+                  <p className="px-4 pb-3 pt-1 text-[10px] leading-relaxed text-wd-sub">
+                    Wrap and unwrap are the public ramp legs. Swap amounts stay sealed on-chain.
+                  </p>
+                </>,
+              )}
+            </div>
+          )}
+        </div>
+
+        <nav aria-label="Wallet tabs" className="flex border-t border-wd-line bg-wd-bg">
+          {(
+            [
+              { id: 'home', label: 'Home', icon: Shield },
+              { id: 'swap', label: 'Swap', icon: ArrowDownUp },
+              { id: 'save', label: 'Save', icon: PiggyBank },
+              { id: 'activity', label: 'Activity', icon: Clock3 },
+            ] as const
+          ).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              data-tour={`tab-${id}`}
+              data-tour-click={`tab-${id}`}
+              onClick={() => {
+                setScreen(id);
+                setSheet('none');
+              }}
+              aria-current={screen === id ? 'page' : undefined}
+              className={cn(
+                'flex flex-1 flex-col items-center gap-1 py-3 text-[10px]',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-wd-accent',
+                screen === id ? 'text-wd-accent' : 'text-wd-sub hover:text-wd-text',
+              )}
+            >
+              <Icon className="h-5 w-5" aria-hidden />
+              <span className={theme.navLabels ? undefined : 'sr-only'}>{label}</span>
+            </button>
+          ))}
+        </nav>
+
+        {sheet === 'deposit' && (
+          <SheetShell title="Deposit to savings" onClose={() => setSheet('none')}>
+            <div data-tour="depositconfirm" className={cn('border border-wd-line p-4', theme.card)}>
+              <InfoRow label="You deposit" value="1,000.00 pcUSD" />
+              <InfoRow
+                label="You receive"
+                value={`≈ ${fmtAmount(SAVINGS_DEPOSIT / savings.rate)} ypcUSD`}
+              />
+              <InfoRow label="Rate" value={`1 ypcUSD = ${savings.rate.toFixed(4)} pcUSD`} dim />
+            </div>
+            <p className="my-3 text-[10px] leading-relaxed text-wd-sub">
+              Shares are sealed on-chain like every balance. Rewards are variable and not
+              guaranteed; eligibility is checked at this step.
+            </p>
+            <div data-tour="deposit-confirm" data-tour-click="deposit-confirm">
+              <PrimaryButton onClick={confirmDeposit} disabled={balances.pcUSD < SAVINGS_DEPOSIT}>
+                Deposit 1,000 pcUSD
+              </PrimaryButton>
+            </div>
+          </SheetShell>
+        )}
+
+        {sheet === 'wrap' && (
+          <SheetShell title="Wrap to private dollar" onClose={() => setSheet('none')}>
+            <div data-tour="wrapsheet" className={cn('border border-wd-line p-4', theme.card)}>
+              <InfoRow label="You wrap" value="250.00 USDC" />
+              <InfoRow label="You receive" value="250.00 pcUSD" />
+              <InfoRow label="Wrap fee (5 bps)" value="$0.13" dim />
+            </div>
+            <p className="my-3 text-[10px] leading-relaxed text-wd-sub">
+              This step is public on-chain. It's the ramp. After it settles, your pcUSD is
+              encrypted: visible to you, to the issuer's auditor key under regulation, and to no
+              one else.
+            </p>
+            <div data-tour="wrap-cta" data-tour-click="wrap-cta">
+              <PrimaryButton onClick={confirmWrap} disabled={balances.USDC < WRAP_AMOUNT}>
+                Wrap 250 USDC
+              </PrimaryButton>
+            </div>
+          </SheetShell>
+        )}
+
+        {sheet === 'confirm' && (
+          <SheetShell title="Confirm swap" onClose={() => setSheet('none')}>
+            <div className={cn('border border-wd-line p-4', theme.card)}>
+              <InfoRow label="You pay" value={`${fmtAmount(amountIn)} pcUSD`} />
+              <InfoRow label="Estimated out" value={`≈ ${fmtAmount(estimateOut(amountIn))} pcDOGE`} />
+              <InfoRow label="Guaranteed minimum" value={`${fmtAmount(floorOut(amountIn, tolerance))} pcDOGE`} />
+              <InfoRow label="Swap fee" value="0.30%" dim />
+            </div>
+            <div data-tour="split" className="my-3 grid grid-cols-2 gap-2 text-[10px] leading-relaxed">
+              <div className="rounded-xl bg-wd-elev p-2.5 text-wd-sub">
+                <span className="font-medium text-wd-text">Public:</span> that this wallet swapped
+                pcUSD → pcDOGE, and when.
+              </div>
+              <div className="rounded-xl bg-wd-accent/10 p-2.5 text-wd-sub">
+                <span className="font-medium text-wd-accent">Sealed:</span> both amounts, your
+                balances, and the pool's reserves.
+              </div>
+            </div>
+            <div data-tour="swapnow" data-tour-click="swapnow">
+              <PrimaryButton onClick={executeSwap}>Swap now</PrimaryButton>
+            </div>
+          </SheetShell>
+        )}
+
+        {(sheet === 'success' || sheet === 'wrapSuccess') && (
+          <SheetShell
+            title={sheet === 'success' ? 'Swap settled' : 'Wrapped'}
+            onClose={() => setSheet('none')}
+          >
+            <div data-tour="success" className="flex flex-col items-center gap-3 py-2 text-center">
+              <span className="flex h-14 w-14 items-center justify-center rounded-full bg-wd-up/15 text-wd-up">
+                <Check className="h-7 w-7" aria-hidden />
+              </span>
+              <p className="text-sm text-wd-text">
+                {sheet === 'success'
+                  ? 'Swapped in one transaction. Amounts sealed on-chain.'
+                  : 'Your dollars are now a private balance.'}
+              </p>
+              <p className="text-[10px] leading-relaxed text-wd-sub">
+                {sheet === 'success'
+                  ? 'Debit receipt, encrypted curve math, payout: one atomic transaction.'
+                  : 'Reveal it anytime with your viewing key.'}
+              </p>
+              <div
+                className="w-full pt-1"
+                data-tour={sheet === 'success' ? 'viewactivity' : 'wrapdone'}
+                data-tour-click={sheet === 'success' ? 'viewactivity' : 'wrapdone'}
+              >
+                <PrimaryButton
+                  onClick={() => {
+                    setSheet('none');
+                    setScreen(sheet === 'success' ? 'activity' : 'home');
+                  }}
+                >
+                  {sheet === 'success' ? 'View activity' : 'Done'}
+                </PrimaryButton>
+              </div>
+            </div>
+          </SheetShell>
+        )}
+      </div>
+    </WalletThemeProvider>
+  );
+});
+```
+
+## `demo/wallet/components/wallet-demo/GuidedTour.tsx`
+
+```tsx
+/**
+ * GuidedTour — spotlight overlay + anchored tooltip for the wallet demo.
+ *
+ * The spotlight is a single div whose geometry GSAP morphs between
+ * data-tour anchors inside the phone; a 9999px box-shadow dims everything
+ * around it and four corner brackets "lock on". The overlay portals into
+ * the phone frame so the frame's rounded corners clip it.
+ *
+ * Narration is a tooltip anchored to the spotlight's bounding box: it
+ * floats beside the phone at the spotlight's height and glides with it,
+ * so eyes and mouse never leave the phone. Next lives on the tooltip;
+ * interactive steps swap it for a pulsing click-prompt.
+ *
+ * Reduced motion: every tween collapses to a jump cut; pulses never start.
+ */
+
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
+import gsap from 'gsap';
+import { cn } from '@/lib/cn';
+import { TOUR_STEPS } from './tourSteps';
+
+const BRACKET = 14;
+
+function reducedMotion(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+export interface SpotRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface SpotlightOverlayProps {
+  stepIndex: number;
+  frameHost: HTMLElement | null;
+  onRect?: (rect: SpotRect) => void;
+}
+
+export function SpotlightOverlay({ stepIndex, frameHost, onRect }: SpotlightOverlayProps) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const pulseRef = useRef<gsap.core.Tween | null>(null);
+
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box || !frameHost) return;
+    const step = TOUR_STEPS[stepIndex];
+    const measure = (): SpotRect | null => {
+      const targetEl =
+        step.target === 'frame'
+          ? frameHost
+          : frameHost.querySelector<HTMLElement>(`[data-tour="${step.target}"]`);
+      if (!targetEl) return null;
+      const host = frameHost.getBoundingClientRect();
+      const r = targetEl.getBoundingClientRect();
+      const pad = step.target === 'frame' ? 6 : 8;
+      return {
+        left: r.left - host.left - pad,
+        top: r.top - host.top - pad,
+        width: r.width + pad * 2,
+        height: r.height + pad * 2,
+      };
+    };
+
+    const settle = step.settle ?? 120;
+    let measured = false;
+    const timer = window.setTimeout(() => {
+      const rect = measure();
+      if (!rect) return;
+      measured = true;
+      const targetEl =
+        step.target === 'frame'
+          ? frameHost
+          : frameHost.querySelector<HTMLElement>(`[data-tour="${step.target}"]`);
+      targetEl?.scrollIntoView({
+        block: 'nearest',
+        behavior: reducedMotion() ? 'auto' : 'smooth',
+      });
+      onRect?.(rect);
+      const instant = reducedMotion();
+      gsap.to(box, {
+        ...rect,
+        autoAlpha: 1,
+        duration: instant ? 0 : 0.65,
+        ease: 'power4.inOut',
+      });
+      pulseRef.current?.kill();
+      if (!instant) {
+        gsap.fromTo(
+          box.querySelectorAll('[data-bracket]'),
+          { scale: 1.9, opacity: 0 },
+          {
+            scale: 1,
+            opacity: 1,
+            duration: 0.5,
+            stagger: 0.04,
+            ease: 'back.out(2.2)',
+            delay: 0.35,
+          },
+        );
+        pulseRef.current = gsap.to(box, {
+          boxShadow: '0 0 0 9999px rgba(0,0,0,0.72), 0 0 32px 2px rgba(244,239,227,0.28)',
+          repeat: -1,
+          yoyo: true,
+          duration: 1.6,
+          ease: 'sine.inOut',
+          delay: 0.9,
+        });
+      }
+    }, settle);
+
+    const nudge = () => {
+      if (reducedMotion()) return;
+      gsap.fromTo(
+        box,
+        { x: 0 },
+        { x: 7, duration: 0.07, repeat: 5, yoyo: true, ease: 'sine.inOut', clearProps: 'x' },
+      );
+    };
+    frameHost.addEventListener('wd-tour-nudge', nudge);
+
+    // Layout can shift under a measured spotlight (viewport resize, late
+    // content, dev-time hot reload). Re-measure and snap without tweening.
+    const resync = () => {
+      if (!measured) return;
+      const rect = measure();
+      if (!rect) return;
+      onRect?.(rect);
+      gsap.set(box, rect);
+    };
+    const observer = new ResizeObserver(resync);
+    observer.observe(frameHost);
+    window.addEventListener('resize', resync);
+
+    return () => {
+      window.clearTimeout(timer);
+      pulseRef.current?.kill();
+      frameHost.removeEventListener('wd-tour-nudge', nudge);
+      observer.disconnect();
+      window.removeEventListener('resize', resync);
+    };
+  }, [stepIndex, frameHost, onRect]);
+
+  if (!frameHost) return null;
+
+  return createPortal(
+    <div className="pointer-events-none absolute inset-0 z-30" aria-hidden>
+      <div
+        ref={boxRef}
+        className="absolute rounded-2xl opacity-0"
+        style={{
+          left: 20,
+          top: 20,
+          width: 120,
+          height: 80,
+          boxShadow: '0 0 0 9999px rgba(0,0,0,0.72), 0 0 24px 0px rgba(244,239,227,0.18)',
+        }}
+      >
+        {(
+          [
+            ['top', 'left', 'border-t-2 border-l-2', 'rounded-tl-lg'],
+            ['top', 'right', 'border-t-2 border-r-2', 'rounded-tr-lg'],
+            ['bottom', 'left', 'border-b-2 border-l-2', 'rounded-bl-lg'],
+            ['bottom', 'right', 'border-b-2 border-r-2', 'rounded-br-lg'],
+          ] as const
+        ).map(([v, h, borders, round]) => (
+          <span
+            key={`${v}-${h}`}
+            data-bracket
+            className={cn('absolute border-glint/90', borders, round)}
+            style={{ [v]: -2, [h]: -2, width: BRACKET, height: BRACKET }}
+          />
+        ))}
+      </div>
+    </div>,
+    frameHost,
+  );
+}
+
+export interface TourTooltipProps {
+  stepIndex: number;
+  rect: SpotRect | null;
+  frameHost: HTMLElement | null;
+  wrapperRef: RefObject<HTMLDivElement | null>;
+  onNext: () => void;
+  onBack: () => void;
+  onExit: () => void;
+}
+
+export function TourTooltip({
+  stepIndex,
+  rect,
+  frameHost,
+  wrapperRef,
+  onNext,
+  onBack,
+  onExit,
+}: TourTooltipProps) {
+  const step = TOUR_STEPS[stepIndex];
+  const tipRef = useRef<HTMLDivElement>(null);
+  const caretRef = useRef<HTMLSpanElement>(null);
+  const last = stepIndex === TOUR_STEPS.length - 1;
+  const interactive = step.advance === 'click';
+
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    const wrapper = wrapperRef.current;
+    if (!tip || !wrapper || !frameHost || !rect) return;
+    const wide = window.matchMedia('(min-width: 1024px)').matches;
+    if (!wide) {
+      gsap.set(tip, { clearProps: 'left,top' });
+      gsap.to(tip, { autoAlpha: 1, duration: reducedMotion() ? 0 : 0.3 });
+      return;
+    }
+    const w = wrapper.getBoundingClientRect();
+    const f = frameHost.getBoundingClientRect();
+    const frameLeft = f.left - w.left;
+    const frameTop = f.top - w.top;
+    const tipH = tip.offsetHeight;
+    const left = frameLeft + f.width + 28;
+    const idealTop = frameTop + rect.top + rect.height / 2 - tipH / 2;
+    const top = Math.max(0, Math.min(idealTop, w.height - tipH));
+    const caret = caretRef.current;
+    if (caret) {
+      const spotCenter = frameTop + rect.top + rect.height / 2;
+      const caretTop = Math.max(14, Math.min(spotCenter - top, tipH - 14));
+      caret.style.top = `${caretTop}px`;
+    }
+    const instant = reducedMotion();
+    gsap.to(tip, {
+      left,
+      top,
+      autoAlpha: 1,
+      duration: instant ? 0 : 0.55,
+      ease: 'power3.out',
+    });
+  }, [stepIndex, rect, frameHost, wrapperRef]);
+
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    if (!tip || reducedMotion()) return;
+    gsap.fromTo(
+      tip.querySelectorAll('[data-line]'),
+      { y: 10, autoAlpha: 0 },
+      { y: 0, autoAlpha: 1, duration: 0.45, stagger: 0.06, ease: 'power3.out', delay: 0.1 },
+    );
+  }, [stepIndex]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onExit();
+      else if (!interactive && (e.key === 'ArrowRight' || e.key === 'Enter')) onNext();
+      else if (e.key === 'ArrowLeft') onBack();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onNext, onBack, onExit, interactive]);
+
+  return (
+    <div
+      ref={tipRef}
+      className={cn(
+        'z-40 w-[300px] border border-tide bg-abyss p-4 opacity-0 shadow-2xl shadow-black/70',
+        'lg:absolute lg:left-0 lg:top-0',
+        'max-lg:mx-auto max-lg:mt-4',
+      )}
+      role="dialog"
+      aria-label={`Tour step ${stepIndex + 1}: ${step.title}`}
+    >
+      <span
+        ref={caretRef}
+        aria-hidden
+        className="absolute -left-[7px] hidden h-3 w-3 -translate-y-1/2 rotate-45 border-b border-l border-tide bg-abyss lg:block"
+        style={{ top: 24 }}
+      />
+      <p data-line className="font-body text-[9px] uppercase tracking-[0.3em] text-mist">
+        {stepIndex + 1} / {TOUR_STEPS.length}
+      </p>
+      <h3 data-line className="mt-1.5 font-headline text-xl italic leading-snug text-pearl">
+        {step.title}
+      </h3>
+      <p data-line className="mt-2 font-body text-xs leading-relaxed text-silk">
+        {step.copy}
+      </p>
+
+      <div className="mt-3 h-0.5 w-full bg-tide" aria-hidden>
+        <div
+          className="h-full bg-glint transition-[width] duration-300"
+          style={{ width: `${((stepIndex + 1) / TOUR_STEPS.length) * 100}%` }}
+        />
+      </div>
+
+      <div className="mt-3 flex h-[36px] items-center justify-between gap-2">
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onExit}
+            className="px-1.5 py-2 font-body text-[9px] uppercase tracking-[0.2em] text-mist hover:text-silk focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-glint"
+          >
+            End
+          </button>
+          <button
+            type="button"
+            onClick={onBack}
+            disabled={stepIndex === 0}
+            className={cn(
+              'px-1.5 py-2 font-body text-[9px] uppercase tracking-[0.2em]',
+              'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-glint',
+              stepIndex === 0 ? 'cursor-not-allowed text-mist/40' : 'text-silk hover:text-pearl',
+            )}
+          >
+            Back
+          </button>
+        </div>
+        {interactive ? (
+          <span className="border border-glint/40 px-3 py-2 font-body text-[9px] uppercase tracking-[0.18em] text-glint motion-safe:animate-pulse">
+            {step.clickPrompt}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={last ? onExit : onNext}
+            className="bg-pearl px-4 py-2 font-body text-[9px] uppercase tracking-[0.2em] text-void hover:bg-glint focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-glint focus-visible:ring-offset-2 focus-visible:ring-offset-void"
+          >
+            {last ? 'Finish' : 'Next'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function useFrameHost(themeId: string): HTMLElement | null {
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setHost(document.querySelector<HTMLElement>('[data-wd-frame]'));
+  }, [themeId]);
+  return host;
+}
+```
+
+## `demo/wallet/components/wallet-demo/tourSteps.ts`
+
+```ts
+/**
+ * Guided-tour script for the wallet demo.
+ *
+ * Two step kinds:
+ *   advance: 'next'  — narration; the user presses Next.
+ *   advance: 'click' — interactive; the user must click the real control
+ *     carrying data-tour-click={clickTarget}. The click drives the wallet
+ *     itself (reveal, sheets, tabs, deposit, settlement), so the tutorial
+ *     is the product, not a slideshow over it.
+ *
+ * `action` runs when the step is entered (scripted state repair only —
+ * everything user-visible is user-clicked where possible). `settle` is ms
+ * to wait before measuring the spotlight target.
+ */
+
+export type TourAction = 'home' | 'close-sheet-home' | 'reset';
+
+export interface TourStep {
+  id: string;
+  target: string;
+  title: string;
+  copy: string;
+  advance: 'next' | 'click';
+  clickTarget?: string;
+  clickPrompt?: string;
+  action?: TourAction;
+  settle?: number;
+}
+
+export const TOUR_STEPS: TourStep[] = [
+  {
+    id: 'welcome',
+    target: 'frame',
+    title: 'Your wallet, with a private dollar',
+    copy: 'Same wallet you know. One new property: amounts can be sealed. This tour has you drive. When a control glows, click it.',
+    advance: 'next',
+    action: 'reset',
+    settle: 250,
+  },
+  {
+    id: 'private',
+    target: 'private',
+    title: 'Balances the chain never shows',
+    copy: 'On-chain these are ciphertexts. Not small numbers. Not hidden numbers. No numbers. Notice the total above counts only public tokens.',
+    advance: 'next',
+  },
+  {
+    id: 'reveal',
+    target: 'reveal-eye',
+    title: 'Reveal with your viewing key',
+    copy: 'Decryption happens on this device, from your seed. Nothing is sent anywhere.',
+    advance: 'click',
+    clickTarget: 'reveal-eye',
+    clickPrompt: 'Click the eye on pcUSD',
+  },
+  {
+    id: 'total-after',
+    target: 'total',
+    title: 'Now the total includes it',
+    copy: 'Only your screen changed. The chain still shows ciphertext.',
+    advance: 'next',
+    settle: 1400,
+  },
+  {
+    id: 'wrap-open',
+    target: 'action-wrap',
+    title: 'The ramp',
+    copy: 'Wrap moves public dollars into the vault and back. It is the one deliberately public step.',
+    advance: 'click',
+    clickTarget: 'action-wrap',
+    clickPrompt: 'Click Wrap',
+  },
+  {
+    id: 'wrap-sheet',
+    target: 'wrap-cta',
+    title: 'Public by design',
+    copy: 'This transaction is visible on-chain. KYC and compliance live here, with the issuer, never inside your balance.',
+    advance: 'click',
+    clickTarget: 'wrap-cta',
+    clickPrompt: 'Click Wrap 250 USDC',
+    settle: 450,
+  },
+  {
+    id: 'wrap-done',
+    target: 'success',
+    title: 'Now it’s private',
+    copy: 'The wrap settled. From here on, this balance is ciphertext.',
+    advance: 'click',
+    clickTarget: 'wrapdone',
+    clickPrompt: 'Click Done',
+    settle: 450,
+  },
+  {
+    id: 'swap-tab',
+    target: 'tab-swap',
+    title: 'Now trade it',
+    copy: 'The private dollar needs a private venue.',
+    advance: 'click',
+    clickTarget: 'tab-swap',
+    clickPrompt: 'Open the Swap tab',
+    action: 'close-sheet-home',
+    settle: 350,
+  },
+  {
+    id: 'quote',
+    target: 'quote',
+    title: 'An estimate, plus a floor you choose',
+    copy: 'Reserves are encrypted, so a firm quote is impossible without leaking them. Your floor is enforced inside the encrypted math.',
+    advance: 'next',
+    settle: 350,
+  },
+  {
+    id: 'review',
+    target: 'review',
+    title: 'Take the swap to review',
+    copy: 'One hundred pcUSD to pcDOGE, floor set.',
+    advance: 'click',
+    clickTarget: 'review',
+    clickPrompt: 'Click Review swap',
+  },
+  {
+    id: 'split',
+    target: 'split',
+    title: 'Public and sealed, stated plainly',
+    copy: 'Public: that this wallet swapped, and when. Sealed: both amounts, your balances, the pool’s reserves.',
+    advance: 'next',
+    settle: 450,
+  },
+  {
+    id: 'swap-now',
+    target: 'swapnow',
+    title: 'One atomic transaction',
+    copy: 'Debit receipt, encrypted curve, payout. No partial state, no mempool window.',
+    advance: 'click',
+    clickTarget: 'swapnow',
+    clickPrompt: 'Click Swap now',
+  },
+  {
+    id: 'settled',
+    target: 'viewactivity',
+    title: 'Settled, sealed',
+    copy: 'The amounts never touched the public ledger.',
+    advance: 'click',
+    clickTarget: 'viewactivity',
+    clickPrompt: 'Click View activity',
+    settle: 500,
+  },
+  {
+    id: 'activity',
+    target: 'activity',
+    title: 'What observers keep',
+    copy: 'That you traded. Never how much. Ramp rows show amounts; sealed rows never will.',
+    advance: 'next',
+    settle: 450,
+  },
+  {
+    id: 'save-tab',
+    target: 'tab-save',
+    title: 'One more thing: yield',
+    copy: 'A private dollar that also grows, backed by short-dated treasuries via Solomon and Bridge.',
+    advance: 'click',
+    clickTarget: 'tab-save',
+    clickPrompt: 'Open the Save tab',
+  },
+  {
+    id: 'save-intro',
+    target: 'saveinfo',
+    title: 'An exchange-rate share',
+    copy: 'ypcUSD is a share whose public rate only rises. Your share count is sealed; the rate is not: a public rate over sealed balances reveals no one.',
+    advance: 'next',
+    settle: 400,
+  },
+  {
+    id: 'deposit-open',
+    target: 'deposit',
+    title: 'Move dollars into savings',
+    copy: 'Rewards are variable and not guaranteed. That honesty is part of the design.',
+    advance: 'click',
+    clickTarget: 'deposit',
+    clickPrompt: 'Click Deposit',
+  },
+  {
+    id: 'deposit-confirm',
+    target: 'deposit-confirm',
+    title: 'Sealed shares at today’s rate',
+    copy: '1,000 pcUSD buys shares at the current rate. The share count is a ciphertext, like every other balance.',
+    advance: 'click',
+    clickTarget: 'deposit-confirm',
+    clickPrompt: 'Confirm the deposit',
+    settle: 450,
+  },
+  {
+    id: 'settle-week',
+    target: 'settle',
+    title: 'Then a week passes',
+    copy: 'Solomon streams treasury rewards to the vault: one aggregate transfer, no per-holder payout. Run the week.',
+    advance: 'click',
+    clickTarget: 'settle',
+    clickPrompt: 'Click Run a week',
+    settle: 500,
+  },
+  {
+    id: 'rate-after',
+    target: 'savevalue',
+    title: 'You earned by nothing happening',
+    copy: 'The rate rose. Your shares never moved. No payout touched your address. A visible reward would reveal your balance; a rising public rate reveals no one.',
+    advance: 'next',
+    settle: 1300,
+  },
+  {
+    id: 'finale',
+    target: 'frame',
+    title: 'That’s the stack',
+    copy: 'A compliant dollar, sealed amounts, an honest venue, and treasury yield, in the wallet you already have.',
+    advance: 'next',
+    settle: 300,
+  },
+];
+```
+
+## `demo/wallet/components/wallet-demo/data.ts`
+
+```ts
+/**
+ * Wallet-demo state + mock data.
+ *
+ * Everything here is illustrative: no wallet connection, no RPC, no real
+ * balances. The demo shows what pc-token / pc-swap flows would look and
+ * feel like inside a consumer wallet (Phantom/Solflare-class layout),
+ * with the honest constraints of the rail preserved:
+ *   - private balances render hidden until a local viewing-key decrypt
+ *   - swap quotes are Pyth-anchored estimate + guaranteed floor, never a
+ *     firm outAmount (confidential-swap-pilot.md §6)
+ *   - wrap/unwrap is the public plaintext boundary; swap amounts are not
+ */
+
+export type ScreenId = 'home' | 'swap' | 'save' | 'activity';
+export type SheetId = 'none' | 'wrap' | 'confirm' | 'success' | 'wrapSuccess' | 'deposit';
+
+/** Savings (ypcUSD) demo constants: exchange-rate share over the vault.
+    One simulated weekly Solomon settlement moves the rate start → week. */
+export const SAVINGS_RATE_START = 1.0231;
+export const SAVINGS_RATE_WEEK = 1.0243;
+export const SAVINGS_DEPOSIT = 1000;
+
+export interface DemoToken {
+  symbol: string;
+  name: string;
+  glyph: string;
+  amount: number;
+  usdPrice: number;
+  change24h: number;
+  isPrivate?: boolean;
+}
+
+export interface ActivityEntry {
+  id: string;
+  kind: 'swap' | 'wrap' | 'receive';
+  title: string;
+  detail: string;
+  amount: string;
+  sealed?: boolean;
+}
+
+export interface Balances {
+  SOL: number;
+  USDC: number;
+  pcUSD: number;
+  pcDOGE: number;
+}
+
+export const INITIAL_BALANCES: Balances = {
+  SOL: 8.42,
+  USDC: 1240.5,
+  pcUSD: 4200.0,
+  pcDOGE: 12480,
+};
+
+export const WRAP_AMOUNT = 250;
+
+export const PUBLIC_META: Omit<DemoToken, 'amount'>[] = [
+  { symbol: 'SOL', name: 'Solana', glyph: '◎', usdPrice: 176.5, change24h: 2.4 },
+  { symbol: 'USDC', name: 'USD Coin', glyph: '$', usdPrice: 1, change24h: 0.0 },
+];
+
+export const PRIVATE_META: Omit<DemoToken, 'amount'>[] = [
+  { symbol: 'pcUSD', name: 'Private dollar', glyph: '$', usdPrice: 1, change24h: 0.0, isPrivate: true },
+  { symbol: 'pcDOGE', name: 'Private DOGE', glyph: 'Ð', usdPrice: 0.042, change24h: -1.2, isPrivate: true },
+];
+
+export const YPCUSD_META: Omit<DemoToken, 'amount' | 'usdPrice'> = {
+  symbol: 'ypcUSD',
+  name: 'Savings share',
+  glyph: '◆',
+  change24h: 0.0,
+  isPrivate: true,
+};
+
+export const INITIAL_ACTIVITY: ActivityEntry[] = [
+  {
+    id: 'a3',
+    kind: 'wrap',
+    title: 'Wrapped to pcUSD',
+    detail: 'USDC → pcUSD · public ramp leg',
+    amount: '250.00 USDC',
+  },
+  {
+    id: 'a2',
+    kind: 'swap',
+    title: 'Private swap',
+    detail: 'pcUSD → pcDOGE · sealed',
+    amount: 'Amount hidden',
+    sealed: true,
+  },
+  {
+    id: 'a1',
+    kind: 'receive',
+    title: 'Received',
+    detail: 'From 7xKX…p2aB',
+    amount: '+2.00 SOL',
+  },
+];
+
+/** Mock Pyth mid for the pcUSD → pcDOGE pair (1 USD ≈ 23.8 DOGE). */
+export const PYTH_MID = 23.8;
+export const SWAP_FEE = 0.003;
+export const EXPECTED_SPREAD = 0.002;
+
+export function estimateOut(amountIn: number): number {
+  return amountIn * PYTH_MID * (1 - SWAP_FEE - EXPECTED_SPREAD);
+}
+
+export function floorOut(amountIn: number, tolerancePct: number): number {
+  return amountIn * PYTH_MID * (1 - SWAP_FEE - tolerancePct / 100);
+}
+
+export function fmtUsd(n: number): string {
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+}
+
+export function fmtAmount(n: number, maxFrac = 2): string {
+  return n.toLocaleString('en-US', { maximumFractionDigits: maxFrac });
+}
+```
+
+## `demo/wallet/components/wallet-demo/theme.ts`
+
+```ts
+/**
+ * Wallet-demo style studies, calibrated against real Phantom and Solflare
+ * screenshots (2026-07-20).
+ *
+ * Each theme is (a) a CSS-var override class from index.css recoloring the
+ * wd-* tokens, and (b) structural knobs for the layout grammar the looks
+ * actually differ on:
+ *   - Phantom-style: neutral dark gray, purple as icon accent only, square
+ *     action cards, each token its own rounded card, icon-only bottom nav,
+ *     change shown as a green pill.
+ *   - Solflare-style: near-black, yellow accent, circular actions with
+ *     white icons, flat token rows, left-aligned totals, icon-only nav.
+ *   - Neutral: the original generic study.
+ *
+ * Approximations for a partner-facing "in your wallet" mock only — no
+ * affiliation, no endorsement, no logos or wordmarks.
+ */
+
+import { createContext, useContext } from 'react';
+
+export type WalletThemeId = 'neutral' | 'phantom' | 'solflare';
+
+export interface WalletThemeSpec {
+  id: WalletThemeId;
+  label: string;
+  frameClass: string;
+  card: string;
+  cta: string;
+  /** Action-row treatment: circular buttons vs Phantom's square cards. */
+  actionStyle: 'circle-accent' | 'square-card' | 'circle-white';
+  /** Token-list treatment: one container, per-row cards, or flat rows. */
+  listStyle: 'container' | 'cards' | 'flat';
+  totalAlign: 'center' | 'left';
+  /** Icon-only bottom nav (labels stay for screen readers). */
+  navLabels: boolean;
+  changePill: boolean;
+  accountName: string;
+}
+
+export const WALLET_THEMES: Record<WalletThemeId, WalletThemeSpec> = {
+  neutral: {
+    id: 'neutral',
+    label: 'Neutral',
+    frameClass: '',
+    card: 'rounded-2xl',
+    cta: 'rounded-2xl',
+    actionStyle: 'circle-accent',
+    listStyle: 'container',
+    totalAlign: 'center',
+    navLabels: true,
+    changePill: false,
+    accountName: 'Wallet 1',
+  },
+  phantom: {
+    id: 'phantom',
+    label: 'Phantom-style',
+    frameClass: 'wd-theme-phantom',
+    card: 'rounded-2xl',
+    cta: 'rounded-full',
+    actionStyle: 'square-card',
+    listStyle: 'cards',
+    totalAlign: 'center',
+    navLabels: false,
+    changePill: true,
+    accountName: 'Account 1',
+  },
+  solflare: {
+    id: 'solflare',
+    label: 'Solflare-style',
+    frameClass: 'wd-theme-solflare',
+    card: 'rounded-xl',
+    cta: 'rounded-xl',
+    actionStyle: 'circle-white',
+    listStyle: 'flat',
+    totalAlign: 'left',
+    navLabels: false,
+    changePill: false,
+    accountName: 'Main Wallet',
+  },
+};
+
+const WalletThemeContext = createContext<WalletThemeSpec>(WALLET_THEMES.neutral);
+
+export const WalletThemeProvider = WalletThemeContext.Provider;
+
+export function useWalletTheme(): WalletThemeSpec {
+  return useContext(WalletThemeContext);
+}
+```
+
+## `demo/wallet/components/wallet-demo/bits.tsx`
+
+```tsx
+/**
+ * Small shared pieces of the mock wallet frame. wd-* tokens only —
+ * this is the quoted third-party-wallet theme, not Dagon chrome.
+ */
+
+import type { ReactNode } from 'react';
+import { Eye, EyeOff, Lock } from 'lucide-react';
+import { cn } from '@/lib/cn';
+import { fmtAmount, fmtUsd, type DemoToken } from './data';
+import { useWalletTheme } from './theme';
+
+export function TokenGlyph({ token, size = 'md' }: { token: DemoToken; size?: 'sm' | 'md' }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'inline-flex items-center justify-center rounded-full font-semibold shrink-0',
+        size === 'md' ? 'h-10 w-10 text-base' : 'h-7 w-7 text-xs',
+        token.isPrivate
+          ? 'bg-wd-accent/15 text-wd-accent ring-1 ring-wd-accent/30'
+          : 'bg-wd-elev text-wd-text ring-1 ring-wd-line',
+      )}
+    >
+      {token.glyph}
+    </span>
+  );
+}
+
+export function ChangeTag({ pct }: { pct: number }) {
+  const flat = Math.abs(pct) < 0.005;
+  return (
+    <span
+      className={cn(
+        'font-mono text-[11px] tabular-nums',
+        flat ? 'text-wd-sub' : pct > 0 ? 'text-wd-up' : 'text-wd-down',
+      )}
+    >
+      {flat ? '0.00%' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`}
+    </span>
+  );
+}
+
+export interface TokenRowProps {
+  token: DemoToken;
+  revealed: boolean;
+  decrypting: boolean;
+  onToggleReveal?: () => void;
+  eyeClickId?: string;
+}
+
+export function TokenRow({ token, revealed, decrypting, onToggleReveal, eyeClickId }: TokenRowProps) {
+  const hidden = Boolean(token.isPrivate) && !revealed;
+  const usd = token.amount * token.usdPrice;
+  return (
+    <div className="flex items-center gap-3 px-4 py-3">
+      <TokenGlyph token={token} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-sm font-medium text-wd-text">
+          {token.symbol}
+          {token.isPrivate && <Lock aria-label="private balance" className="h-3 w-3 text-wd-accent" />}
+        </div>
+        <div className="flex items-center gap-2 text-xs text-wd-sub">
+          <span>{token.name}</span>
+          <ChangeTag pct={token.change24h} />
+        </div>
+      </div>
+      <div className="text-right">
+        {hidden ? (
+          <div className={cn('font-mono text-sm tracking-widest text-wd-sub', decrypting && 'animate-pulse motion-reduce:animate-none')}>
+            {decrypting ? 'decrypting…' : '••••••'}
+          </div>
+        ) : (
+          <div className="font-mono text-sm tabular-nums text-wd-text">{fmtAmount(token.amount)}</div>
+        )}
+        <div className="font-mono text-xs tabular-nums text-wd-sub">
+          {hidden ? '•••' : fmtUsd(usd)}
+        </div>
+      </div>
+      {token.isPrivate && onToggleReveal && (
+        <button
+          type="button"
+          data-tour={eyeClickId}
+          data-tour-click={eyeClickId}
+          onClick={onToggleReveal}
+          aria-label={revealed ? `Hide ${token.symbol} balance` : `Reveal ${token.symbol} balance with viewing key`}
+          className="ml-1 flex h-10 w-10 items-center justify-center rounded-full text-wd-sub hover:text-wd-text hover:bg-wd-elev focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent"
+        >
+          {revealed ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function SheetShell({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const theme = useWalletTheme();
+  return (
+    <div className="absolute inset-0 z-20 flex flex-col justify-end" role="dialog" aria-modal="true" aria-label={title}>
+      <button
+        type="button"
+        aria-label="Close"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/60 focus-visible:outline-none"
+        tabIndex={-1}
+      />
+      <div className={cn('relative border-t border-wd-line bg-wd-card p-5 pb-6 motion-safe:animate-[wd-sheet_.25s_ease-out]', theme.id === 'solflare' ? 'rounded-t-2xl' : 'rounded-t-3xl')}>
+        <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-wd-line" aria-hidden />
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-wd-text">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full px-3 py-2 text-xs text-wd-sub hover:text-wd-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent"
+          >
+            Close
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function PrimaryButton({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  const theme = useWalletTheme();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'w-full py-3.5 text-sm font-semibold transition-colors',
+        theme.cta,
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wd-accent focus-visible:ring-offset-2 focus-visible:ring-offset-wd-bg',
+        disabled
+          ? 'cursor-not-allowed bg-wd-elev text-wd-sub'
+          : 'bg-wd-accent text-[#0B1020] hover:brightness-110',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+export function InfoRow({ label, value, dim }: { label: string; value: ReactNode; dim?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between py-1.5 text-xs">
+      <span className="text-wd-sub">{label}</span>
+      <span className={cn('font-mono tabular-nums', dim ? 'text-wd-sub' : 'text-wd-text')}>{value}</span>
+    </div>
+  );
+}
+```
+
+## `demo/wallet/components/Disclaimer.tsx`
+
+```tsx
+/**
+ * Pre-alpha disclaimer banner — verbatim from
+ * packages/dagon/documentation/points-farm-copy.md §1.
+ *
+ * SOUL.md §108 ("no FHE-privacy-today claims") makes this banner load-bearing for the points-farm
+ * UI. It must be visible on every screen and the wording must not be paraphrased away from the
+ * source-of-truth doc.
+ */
+
+import { AlertTriangle } from 'lucide-react';
+
+export function PreAlphaDisclaimer() {
+  return (
+    <aside
+      role="note"
+      aria-label="Pre-alpha disclaimer"
+      className="border-l-4 border-amber-500/80 bg-amber-500/5 px-4 py-3 mb-6 text-sm text-amber-100/90 flex gap-3"
+    >
+      <AlertTriangle className="size-4 mt-0.5 flex-shrink-0 text-amber-400" />
+      <p>
+        <strong className="text-amber-300">Pre-alpha:</strong> Encrypt's production FHE is not live
+        yet — your balances and trade amounts are{' '}
+        <strong className="text-amber-300">publicly visible on-chain</strong> today. This is a UX
+        preview to get you ready for Alpha 1, when real encryption ships. Do not trade real value
+        here.
+      </p>
+    </aside>
+  );
+}
+```
+
+## `demo/wallet/theme-tokens.css`
+
+```css
+/* Tailwind v4 theme tokens the wallet demo relies on. wd-* = "wallet demo" palette:
+   a neutral Phantom/Solflare-class look, no real wallet's branding.
+   Paste after `@import "tailwindcss"` in your app CSS. */
+@theme {
+  --color-wd-bg:     #0E0F13;
+  --color-wd-card:   #16181F;
+  --color-wd-elev:   #1D2029;
+  --color-wd-line:   #2A2E3A;
+  --color-wd-text:   #F2F3F7;
+  --color-wd-sub:    #9298AC;
+  --color-wd-accent: #5B8CFF;
+  --color-wd-up:     #34D399;
+  --color-wd-down:   #F87171;
 }
 ```

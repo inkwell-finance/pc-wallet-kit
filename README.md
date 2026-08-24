@@ -28,6 +28,7 @@ https://raw.githubusercontent.com/inkwell-finance/pc-wallet-kit/main/llms-full.m
 | `reference/SwapPage.tsx` | How the demo wires wallet `signTransaction` + `sendRawTransaction` and sequences wrap → swap → reveal. |
 | `vendor/encrypt/client/` | The three-file gRPC-web client closure. Use this; the published npm package is broken as published. |
 | `vendor/encrypt/examples/` | Upstream instruction builders and both on-chain programs — authoritative over the guide where they disagree. |
+| `demo/` | The guided mock-wallet walkthrough from the call — interaction patterns for reveal, floor, ramp, settled states. Mock data only; see `demo/README.md`. |
 | `THIRD-PARTY-NOTICES.md` | Encrypt files are BSD-3-Clause-Clear, dWallet Labs. |
 
 Dependencies the reference code expects: `@solana/web3.js`, `@solana/spl-token`, `@noble/curves`, `@protobuf-ts/runtime`, `@protobuf-ts/runtime-rpc`, `@protobuf-ts/grpcweb-transport`.
