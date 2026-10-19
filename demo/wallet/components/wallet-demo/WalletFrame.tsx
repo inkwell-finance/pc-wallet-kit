@@ -382,8 +382,8 @@ export const WalletFrame = forwardRef<WalletFrameHandle, WalletFrameProps>(funct
                       ),
                     )}
                     <p className="px-4 pb-3 pt-1 text-[10px] leading-relaxed text-wd-sub">
-                      Encrypted on-chain. Even the issuer can't read them. Reveal decrypts locally
-                      with your viewing key; nothing leaves this device.
+                      Once Encrypt's encryption is live, these balances are encrypted on-chain and
+                      only your viewing key can read them. Pre-alpha: values are still plaintext.
                     </p>
                   </>,
                   <div className="flex items-center gap-1.5 px-4 pb-1 pt-3 text-[10px] font-medium uppercase tracking-widest text-wd-sub">
@@ -659,9 +659,9 @@ export const WalletFrame = forwardRef<WalletFrameHandle, WalletFrameProps>(funct
               <InfoRow label="Wrap fee (5 bps)" value="$0.13" dim />
             </div>
             <p className="my-3 text-[10px] leading-relaxed text-wd-sub">
-              This step is public on-chain. It's the ramp. After it settles, your pcUSD is
-              encrypted: visible to you, to the issuer's auditor key under regulation, and to no
-              one else.
+              This step is public on-chain. It's the ramp. Once encryption is live, your pcUSD
+              balance after this step is encrypted and readable only with your viewing key.
+              Pre-alpha: it is still plaintext.
             </p>
             <div data-tour="wrap-cta" data-tour-click="wrap-cta">
               <PrimaryButton onClick={confirmWrap} disabled={balances.USDC < WRAP_AMOUNT}>

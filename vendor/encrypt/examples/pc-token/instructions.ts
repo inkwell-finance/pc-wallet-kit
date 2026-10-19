@@ -172,13 +172,18 @@ export function deriveVaultPda(
 }
 
 
-/** Instruction 23: InitializeVault */
+/**
+ * Instruction 23: InitializeVault.
+ * Epoch 2: the pc mint's authority must sign (trailing account), and
+ * `vaultBump` must be the canonical bump.
+ */
 export function initializeVaultIx(
   ctx: PcTokenContext,
   vaultPda: PublicKey,
   vaultBump: number,
   pcMint: PublicKey,
-  splMint: PublicKey
+  splMint: PublicKey,
+  mintAuthority: PublicKey
 ): TransactionInstruction {
   return new TransactionInstruction({
     programId: ctx.programId,
@@ -189,11 +194,16 @@ export function initializeVaultIx(
       { pubkey: splMint, isSigner: false, isWritable: false },
       { pubkey: ctx.payer, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: mintAuthority, isSigner: true, isWritable: false },
     ],
   });
 }
 
-/** Instruction 30: Wrap (deposit SPL → mint pcToken) */
+/**
+ * Instruction 30: Wrap (deposit SPL → mint pcToken).
+ * Epoch 2: `amountCt` is a FRESH keypair (partialSign it). The program
+ * creates it from `amount` after the SPL transfer; do not call createInput.
+ */
 export function wrapIx(
   ctx: PcTokenContext,
   vault: PublicKey,
@@ -219,7 +229,7 @@ export function wrapIx(
       { pubkey: userAta, isSigner: false, isWritable: true },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: balanceCt, isSigner: false, isWritable: true },
-      { pubkey: amountCt, isSigner: false, isWritable: true },
+      { pubkey: amountCt, isSigner: true, isWritable: true },
       ...encryptCpiAccounts(ctx.enc, ctx.programId, ctx.cpiAuthority, owner),
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
@@ -232,7 +242,11 @@ export function deriveReceiptPda(
   return pda([Buffer.from("pc_receipt"), burnedCt.toBuffer()], programId);
 }
 
-/** Instruction 31: UnwrapBurn */
+/**
+ * Instruction 31: UnwrapBurn.
+ * Epoch 2: `burnedCt` is a FRESH keypair (partialSign it); the program
+ * creates it. `amountCt` is still a client createInput (authorized to pc-token).
+ */
 export function unwrapBurnIx(
   ctx: PcTokenContext, vault: PublicKey, tokenAccount: PublicKey,
   receiptPda: PublicKey, receiptBump: number,
@@ -250,13 +264,16 @@ export function unwrapBurnIx(
       { pubkey: receiptPda, isSigner: false, isWritable: true },
       { pubkey: balanceCt, isSigner: false, isWritable: true },
       { pubkey: amountCt, isSigner: false, isWritable: true },
-      { pubkey: burnedCt, isSigner: false, isWritable: true },
+      { pubkey: burnedCt, isSigner: true, isWritable: true },
       ...encryptCpiAccounts(ctx.enc, ctx.programId, ctx.cpiAuthority, owner),
     ],
   });
 }
 
-/** Instruction 32: UnwrapDecrypt */
+/**
+ * Instruction 32: UnwrapDecrypt. Epoch 2: `burnedCt` must be the receipt's
+ * own burned ciphertext; decryption can be requested once per receipt.
+ */
 export function unwrapDecryptIx(
   ctx: PcTokenContext, receipt: PublicKey,
   requestAcct: PublicKey, burnedCt: PublicKey, owner: PublicKey
@@ -273,7 +290,10 @@ export function unwrapDecryptIx(
   });
 }
 
-/** Instruction 33: UnwrapComplete */
+/**
+ * Instruction 33: UnwrapComplete. Epoch 2: vault, pcMint and requestAcct must
+ * match the receipt; everything is checked before the receipt is closed.
+ */
 export function unwrapCompleteIx(
   programId: PublicKey, receipt: PublicKey, vault: PublicKey,
   pcMint: PublicKey, requestAcct: PublicKey,

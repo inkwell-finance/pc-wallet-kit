@@ -1,4 +1,5 @@
 // Copyright (c) dWallet Labs, Ltd.
+// Copyright (c) 2026 Inkwell Finance (epoch-2 hardening)
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 
 #![allow(unexpected_cfgs)]
@@ -22,6 +23,16 @@
 /// 2. AddLiquidity        — 2× TransferWithReceipt + add_liquidity_graph + 2× close
 /// 4. RemoveLiquidity     — remove_liquidity_graph + 2× pc-token::transfer (vault → user)
 /// 5. CreateLpPosition    — internal LP balance account
+///
+/// ## Epoch-2 hardening (Inkwell fork)
+///
+/// The pc-token program, the Encrypt program and pc-token's CPI authority
+/// are pinned, `caller_program` must be this program, and Pool / LpPosition
+/// accounts are loaded only when owned by this program with their exact
+/// length (the pool is also re-derived from its seeds). Before this, a forged
+/// pool plus a fake "pc-token" program could obtain the real pool PDA's
+/// signature, and a forged LP position could withdraw liquidity it never
+/// deposited.
 use encrypt_dsl::prelude::encrypt_fn;
 use encrypt_pinocchio::EncryptContext;
 #[allow(unused_imports)]
@@ -38,10 +49,60 @@ use pinocchio_system::instructions::CreateAccount;
 
 entrypoint!(process_instruction);
 
-pub const ID: Address = Address::new_from_array([6u8; 32]);
+/// pc-swap, devnet epoch 2: `BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD`.
+pub const ID: Address = Address::new_from_array([
+    160, 244, 96, 148, 207, 139, 115, 102, 122, 56, 182, 136, 187, 132, 156, 0, 227, 239, 54, 42,
+    87, 98, 205, 124, 27, 245, 65, 186, 158, 84, 12, 162,
+]);
 
-/// PC-Token program id (mirrors pc-token::ID).
-pub const PC_TOKEN_ID: Address = Address::new_from_array([5u8; 32]);
+/// PC-Token program id (mirrors pc-token::ID), devnet epoch 2:
+/// `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ`. Every `pc_token_program`
+/// account must be this program.
+pub const PC_TOKEN_ID: Address = Address::new_from_array([
+    40, 235, 44, 158, 173, 253, 55, 205, 13, 122, 126, 12, 23, 135, 0, 47, 205, 91, 160, 69, 32,
+    176, 41, 50, 186, 139, 166, 110, 92, 232, 79, 4,
+]);
+
+/// Encrypt program on devnet: `4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8`.
+#[cfg(not(feature = "localnet"))]
+pub const ENCRYPT_ID: Address = Address::new_from_array([
+    54, 52, 193, 56, 216, 205, 66, 173, 150, 219, 76, 71, 2, 69, 247, 186, 158, 244, 102, 172,
+    211, 224, 217, 69, 221, 212, 114, 161, 199, 34, 86, 139,
+]);
+
+/// Encrypt program as deployed by the `encrypt-solana-test` LiteSVM harness.
+#[cfg(feature = "localnet")]
+pub const ENCRYPT_ID: Address = Address::new_from_array([
+    175, 190, 213, 40, 242, 81, 150, 134, 222, 39, 3, 15, 110, 91, 65, 64, 171, 126, 206, 36,
+    245, 170, 97, 22, 255, 187, 65, 204, 51, 109, 125, 133,
+]);
+
+/// System program.
+pub const SYSTEM_ID: Address = Address::new_from_array([0u8; 32]);
+
+/// Encrypt CPI authority seed (same for every caller program).
+const CPI_AUTHORITY_SEED: &[u8] = b"__encrypt_cpi_authority";
+
+/// Custom error codes added by the epoch-2 hardening. Values are stable ABI.
+pub mod err {
+    use pinocchio::error::ProgramError;
+    /// The Encrypt program account is not the pinned Encrypt program.
+    pub const FOREIGN_ENCRYPT: ProgramError = ProgramError::Custom(0x200);
+    /// `caller_program` is not this program.
+    pub const WRONG_CALLER: ProgramError = ProgramError::Custom(0x201);
+    /// `pc_token_program` is not the pinned pc-token program.
+    pub const FOREIGN_PC_TOKEN: ProgramError = ProgramError::Custom(0x202);
+    /// `pc_token_cpi_auth` is not pc-token's Encrypt CPI authority.
+    pub const BAD_PC_TOKEN_CPI_AUTH: ProgramError = ProgramError::Custom(0x203);
+    /// The pool account is not the PDA its seeds derive.
+    pub const BAD_POOL: ProgramError = ProgramError::Custom(0x204);
+    /// A user-supplied bump is not the canonical bump of its PDA.
+    pub const NON_CANONICAL_BUMP: ProgramError = ProgramError::Custom(0x205);
+    /// Two slots that must differ name the same account.
+    pub const ALIASED: ProgramError = ProgramError::Custom(0x206);
+    /// `direction` is neither 0 nor 1.
+    pub const BAD_DIRECTION: ProgramError = ProgramError::Custom(0x207);
+}
 
 /// PC-Token instruction discriminators we invoke via CPI.
 const PC_TOKEN_IX_INIT_ACCT: u8 = 1;
@@ -108,6 +169,107 @@ impl LpPosition {
 
 fn minimum_balance(s: usize) -> u64 {
     (s as u64 + 128) * 6960
+}
+
+const _: () = {
+    assert!(Pool::LEN == 226);
+    assert!(LpPosition::LEN == 97);
+    assert!(core::mem::align_of::<Pool>() == 1);
+    assert!(core::mem::align_of::<LpPosition>() == 1);
+};
+
+// ── Validation helpers (epoch 2) ──
+
+/// Load the pool: owned by this program, exact length, initialized, and its
+/// address re-derived from `["pc_pool", mint_a, mint_b, bump]`.
+pub fn load_pool<'a>(pool_acct: &'a AccountView, program_id: &Address) -> Result<&'a Pool, ProgramError> {
+    if !pool_acct.owned_by(program_id) {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    let d = unsafe { pool_acct.borrow_unchecked() };
+    if d.len() != Pool::LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let pool = Pool::from_bytes(d)?;
+    if pool.is_initialized != 1 {
+        return Err(ProgramError::UninitializedAccount);
+    }
+    let derived = Address::create_program_address(
+        &[b"pc_pool", &pool.mint_a, &pool.mint_b, &[pool.bump]],
+        program_id,
+    )
+    .map_err(|_| err::BAD_POOL)?;
+    if &derived != pool_acct.address() {
+        return Err(err::BAD_POOL);
+    }
+    Ok(pool)
+}
+
+/// Load an LP position: owned by this program, exact length, bound to `pool`
+/// and `owner`.
+pub fn load_lp<'a>(
+    lp_acct: &'a AccountView,
+    program_id: &Address,
+    pool_acct: &AccountView,
+    owner: &AccountView,
+) -> Result<&'a LpPosition, ProgramError> {
+    if !lp_acct.owned_by(program_id) {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    let d = unsafe { lp_acct.borrow_unchecked() };
+    if d.len() != LpPosition::LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let lp = LpPosition::from_bytes(d)?;
+    if &lp.pool != pool_acct.address().as_array() {
+        return Err(ProgramError::InvalidArgument);
+    }
+    if &lp.owner != owner.address().as_array() {
+        return Err(ProgramError::InvalidArgument);
+    }
+    Ok(lp)
+}
+
+/// Pin the Encrypt program, this program as caller, the pc-token program and
+/// pc-token's CPI authority, and the system program.
+pub fn check_programs(
+    program_id: &Address,
+    ep: &AccountView,
+    caller_program: &AccountView,
+    pc_token_cpi_auth: &AccountView,
+    pc_token_program: &AccountView,
+    token_cpi_bump: u8,
+    sys: &AccountView,
+) -> ProgramResult {
+    if ep.address() != &ENCRYPT_ID {
+        return Err(err::FOREIGN_ENCRYPT);
+    }
+    if caller_program.address() != program_id {
+        return Err(err::WRONG_CALLER);
+    }
+    if pc_token_program.address() != &PC_TOKEN_ID {
+        return Err(err::FOREIGN_PC_TOKEN);
+    }
+    let auth = Address::create_program_address(&[CPI_AUTHORITY_SEED, &[token_cpi_bump]], &PC_TOKEN_ID)
+        .map_err(|_| err::BAD_PC_TOKEN_CPI_AUTH)?;
+    if &auth != pc_token_cpi_auth.address() {
+        return Err(err::BAD_PC_TOKEN_CPI_AUTH);
+    }
+    if sys.address() != &SYSTEM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    Ok(())
+}
+
+fn distinct(accts: &[&AccountView]) -> ProgramResult {
+    for (i, a) in accts.iter().enumerate() {
+        for b in &accts[i + 1..] {
+            if a.address() == b.address() {
+                return Err(err::ALIASED);
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── FHE Graphs ──
@@ -231,9 +393,9 @@ fn process_instruction(
 ) -> ProgramResult {
     match data.split_first() {
         Some((&0, rest)) => create_pool(program_id, accounts, rest),
-        Some((&1, rest)) => swap(accounts, rest),
-        Some((&2, rest)) => add_liquidity(accounts, rest),
-        Some((&4, rest)) => remove_liquidity(accounts, rest),
+        Some((&1, rest)) => swap(program_id, accounts, rest),
+        Some((&2, rest)) => add_liquidity(program_id, accounts, rest),
+        Some((&4, rest)) => remove_liquidity(program_id, accounts, rest),
         Some((&5, rest)) => create_lp_position(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -570,6 +732,19 @@ fn create_pool(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     let token_cpi_bump = data[4];
     let _reserved = data[5];
 
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    distinct(&[mint_a, mint_b])?;
+    let (expected_pool, canonical) = Address::find_program_address(
+        &[b"pc_pool", mint_a.address().as_ref(), mint_b.address().as_ref()],
+        program_id,
+    );
+    if canonical != pool_bump {
+        return Err(err::NON_CANONICAL_BUMP);
+    }
+    if &expected_pool != pool_acct.address() {
+        return Err(err::BAD_POOL);
+    }
+
     // 1) Create pool PDA
     let bb = [pool_bump];
     let pool_seeds = [
@@ -802,10 +977,25 @@ fn create_lp_position(
     }
     let (lp_bump, cpi_bump) = (data[0], data[1]);
 
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
+    if ep.address() != &ENCRYPT_ID {
+        return Err(err::FOREIGN_ENCRYPT);
+    }
+    if caller_program.address() != program_id {
+        return Err(err::WRONG_CALLER);
+    }
+    if sys.address() != &SYSTEM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    load_pool(pool_acct, program_id)?;
+    let (expected_lp, canonical) = Address::find_program_address(
+        &[b"pc_lp", pool_acct.address().as_ref(), owner.address().as_ref()],
+        program_id,
+    );
+    if canonical != lp_bump {
+        return Err(err::NON_CANONICAL_BUMP);
+    }
+    if &expected_lp != lp_acct.address() {
+        return Err(ProgramError::InvalidSeeds);
     }
 
     let bb = [lp_bump];
@@ -872,7 +1062,7 @@ fn create_lp_position(
 //
 // Data: [1, swap_cpi_bump, token_cpi_bump, direction]
 //   direction: 0 = A→B, 1 = B→A
-fn swap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn swap(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [
         pool_acct,
         user_in_acct,
@@ -915,12 +1105,17 @@ fn swap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let swap_cpi_bump = data[0];
     let token_cpi_bump = data[1];
     let direction = data[2];
-
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
+    if direction > 1 {
+        return Err(err::BAD_DIRECTION);
     }
+
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    let pool = load_pool(pool_acct, program_id)?;
+    distinct(&[user_in_acct, user_out_acct, vault_in_acct, vault_out_acct, pool_acct])?;
+    distinct(&[
+        user_in_bal_ct, user_out_bal_ct, vault_in_bal_ct, vault_out_bal_ct,
+        reserve_in_ct, reserve_out_ct, amt_in_ct, min_out_ct, amt_out_ct, receipt_ct,
+    ])?;
 
     let (expected_vault_in, expected_vault_out, exp_reserve_in, exp_reserve_out) = if direction == 0
     {
@@ -1060,7 +1255,7 @@ fn swap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
 //   nk, payer (signer = user, also LP owner), evt, sys
 //
 // Data: [2, swap_cpi_bump, token_cpi_bump]
-fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn add_liquidity(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [
         pool_acct,
         lp_pos_acct,
@@ -1106,11 +1301,9 @@ fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let swap_cpi_bump = data[0];
     let token_cpi_bump = data[1];
 
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
-    }
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    let pool = load_pool(pool_acct, program_id)?;
+    distinct(&[user_a_acct, user_b_acct, vault_a_acct, vault_b_acct, pool_acct, lp_pos_acct])?;
     if vault_a_acct.address().as_ref() != &pool.vault_a {
         return Err(ProgramError::InvalidArgument);
     }
@@ -1127,14 +1320,7 @@ fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         return Err(ProgramError::InvalidArgument);
     }
 
-    let lpd = unsafe { lp_pos_acct.borrow_unchecked() };
-    let lp_pos = LpPosition::from_bytes(lpd)?;
-    if &lp_pos.pool != pool_acct.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
-    if &lp_pos.owner != payer.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
+    let lp_pos = load_lp(lp_pos_acct, program_id, pool_acct, payer)?;
     if user_lp_ct.address().as_ref() != &lp_pos.balance {
         return Err(ProgramError::InvalidArgument);
     }
@@ -1223,7 +1409,7 @@ fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
 //
 // Accounts: similar to AddLiquidity but vault → user, plus out_a_ct, out_b_ct.
 // Data: [4, swap_cpi_bump, token_cpi_bump]
-fn remove_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn remove_liquidity(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [
         pool_acct,
         lp_pos_acct,
@@ -1268,11 +1454,9 @@ fn remove_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let swap_cpi_bump = data[0];
     let token_cpi_bump = data[1];
 
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
-    }
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    let pool = load_pool(pool_acct, program_id)?;
+    distinct(&[user_a_acct, user_b_acct, vault_a_acct, vault_b_acct, pool_acct, lp_pos_acct])?;
     if vault_a_acct.address().as_ref() != &pool.vault_a {
         return Err(ProgramError::InvalidArgument);
     }
@@ -1289,14 +1473,7 @@ fn remove_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         return Err(ProgramError::InvalidArgument);
     }
 
-    let lpd = unsafe { lp_pos_acct.borrow_unchecked() };
-    let lp_pos = LpPosition::from_bytes(lpd)?;
-    if &lp_pos.pool != pool_acct.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
-    if &lp_pos.owner != payer.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
+    let lp_pos = load_lp(lp_pos_acct, program_id, pool_acct, payer)?;
     if user_lp_ct.address().as_ref() != &lp_pos.balance {
         return Err(ProgramError::InvalidArgument);
     }

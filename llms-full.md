@@ -1,6 +1,6 @@
 # pc-token / pc-swap — Wallet Integration, LLM-complete bundle (Solana devnet)
 
-> This single file is everything an engineer or coding agent needs to implement wrap, reveal, send, swap and unwrap against the pc-token and pc-swap programs deployed on Solana devnet. Part 1 is the human guide. Part 2 is the verbatim reference source: the browser-tested client, the Encrypt gRPC-web client closure, the upstream instruction builders, and both on-chain programs. Part 3 is the guided mock-wallet demo (UX patterns only; mock data). Addresses in Part 1 were verified live on 2026-08-24. Encrypt source pin: `7d34bb1f5889045a21fb428a96dd667aabd78157`. Repository: https://github.com/inkwell-finance/pc-wallet-kit.
+> This single file is everything an engineer or coding agent needs to implement wrap, reveal, send, swap and unwrap against the pc-token and pc-swap programs deployed on Solana devnet. Part 1 is the human guide. Part 2 is the verbatim reference source: the browser-tested client, the Encrypt gRPC-web client closure, the upstream instruction builders, and both on-chain programs. Part 3 is the guided mock-wallet demo (UX patterns only; mock data). Devnet epoch 2 (2026-10-19): programs patched for the security holes found in epoch 1; read addresses from devnet.json. Encrypt client pin: `7d34bb1f5889045a21fb428a96dd667aabd78157`; program source pin: `3a49223bba94afdd1ae89a785db3210dbfd9aab6` (branch `inkwell/epoch-2-hardening`). Repository: https://github.com/inkwell-finance/pc-wallet-kit.
 >
 > Instructions for an agent: read Part 1 fully first — §1 lists what is NOT true yet (pre-alpha, plaintext, devnet-only, silent no-ops). Implement against the account layouts and discriminators in Part 1; use Part 2 to resolve any ambiguity — the on-chain `lib.rs` files are authoritative over the guide. Do not depend on the `@encrypt.xyz/pre-alpha-solana-client` npm package; vendor the three files in §2.4–2.6 instead and add `@protobuf-ts/runtime`, `@protobuf-ts/runtime-rpc`, `@protobuf-ts/grpcweb-transport` as dependencies. Preserve partial signatures from ephemeral keypairs when the wallet signs. Never report a send or swap as successful from a confirmed signature alone; reveal afterwards.
 
@@ -8,6 +8,19 @@
 
 # Part 1 — Guide
 
+## What changed in epoch 2
+
+Epoch 1 ran the upstream pc-token / pc-swap examples. Those had program-level holes: wrap credited a client-supplied ciphertext, accounts weren't checked for owner or type, the unwrap steps weren't bound together, the Encrypt program and the pc-token program weren't pinned, and pc-swap's pool wasn't owner-checked. Epoch 2 redeploys patched programs at new addresses, built from `encrypt-pre-alpha` branch `inkwell/epoch-2-hardening` (commit `3a49223`). Each hole has a regression test there that fails on the old build.
+
+For a wallet, only these change:
+
+- **Wrap (§4):** the amount ciphertext is a fresh keypair you `partialSign`. There is no `createInput` and no verification poll; the program creates the ciphertext from the SPL amount.
+- **Unwrap (§9):** `burnedCt` is a fresh keypair you `partialSign`, created by the program. The receipt is now 203 bytes, so unwrap rent rises slightly. Decryption can be requested once per receipt.
+- **Errors:** wrong-owner or wrong-length accounts, a foreign Encrypt program, a wrong caller, aliased accounts and non-canonical bumps are rejected. Custom errors are `0x100`–`0x10E` from pc-token and `0x200`–`0x207` from pc-swap (names in the vendored sources).
+
+Every other instruction keeps its discriminator, data and account order. Every address in §2 is new.
+
+---
 
 ## 1. Read this first — what is and isn't true today
 
@@ -49,29 +62,12 @@ Network encryption key (32 bytes, all `0x55`): `Uint8Array(32).fill(0x55)`
 | Program | Address |
 |---|---|
 | Encrypt | `4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8` |
-| pc-token | `3QaXJefrZ5K2nPWUfQwhbqUVMc1azSZT4MzU2hTfQV8C` |
-| pc-swap | `C3FYxXn15CMfimyrPU5FdwjyuMwvjVuB9zUPShL9eEMv` |
+| pc-token | `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ` |
+| pc-swap | `BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD` |
 
-Two mock tokens are deployed, both 6 decimals. They are named USDC and DOGE for demo purposes only — they are test mints we control, worth nothing.
+Two mock tokens, both 6 decimals, named USDC and DOGE for demo purposes only. They are test mints we control, worth nothing. Their SPL mints, pc-mints, vaults, the mock-USDC / mock-DOGE pool and its reserve ciphertexts are created when epoch 2 is initialized on devnet. **[pending deploy]** Read every one of them from [`devnet.json`](devnet.json) rather than from this guide. Its `epoch` bumps on every redeploy, so your build can refuse to run against a stale set.
 
-| | mock-USDC | mock-DOGE |
-|---|---|---|
-| SPL mint | `AHfy9KyJLQMCS6mjcoUvvFgUqKr6HKoywee2mdpBpwa4` | `DHoyYsraopt627rYMgaweGYpm3rQkXXGWL6AW3EZpjon` |
-| pc-mint (PDA) | `6CXh4GJMSd8d3PAYCqsAYyK25prbTH1LAQiusg1BZkAH` | `3pvtAYbteZJWkia5gg8yMSRvFcUfaPjcwoK4LKw274Fn` |
-| pc-mint authority | `G1zjvpQwg9LycZXPCuYN4kxsSNQBMzsXKz9bMz6GkJGD` | `ms9YhtEZPVBdXDwbCswDQc1m7GkrdtiLHF3TzD9SVdH` |
-| vault (PDA) | `5KDQ5YZbDMregqrWpwkqi4dCRU4yqbSCYFngXgdp5Nep` | `GSTAGfDfEhiCuBpzDpTZwbj2XSyZRwbp1Qtq3qudf61S` |
-| vault SPL ATA | `DcBz3thrap7j5QiQA8iaEWZu5p9wfcuz49QU1nFTvs9f` | `2hcPj5doJfYm2UwQPo4hGVUAd5jY6zwrcyxqcSaPg5Uh` |
-
-pc-swap pool (mock-USDC / mock-DOGE, seeded 100 : 100):
-
-| | Address |
-|---|---|
-| pool PDA `[b"pc_pool", pcUSDC, pcDOGE]` | `4f9qJbkX1jkHgzZMVC8eRfQFuPUokf1hZn7rDsYZezWB` |
-| pool vault pc-account USDC / DOGE | `3mX9fEr4uZDF2mUALxM3aSVVmgdFYXPdotXSkZ9PLhsF` / `7BEzSH2GhUVyvxuokrtDG7WdvgDk7hA7CLb73ZCEakRc` |
-| pool vault balance CT USDC / DOGE | `6WXyJ61jV7VW2M5LsrkT4JUzmaJCt3WeSvkTbNbKx96A` / `EdhnbDApUHZ4NMYb6gu8KuoKGyi8Z165mcuJbXuRrojx` |
-| reserve CT USDC / DOGE | `25ir3Q29HsWsFRxyruzraDJb3seGry25GptzZe8aCuho` / `JAZB6uVEJMirzUoZqKvGQE59aoYNUsFjpmgpBtpW1caV` |
-
-All of the above verified live on devnet on 2026-08-24. We will send a `devnet.json` with the same fields, plus an `epoch` number that bumps on every redeploy, so your build can refuse to run against a stale set.
+The epoch 1 addresses (pc-token `3QaXJefr…`, pc-swap `C3FYxXn1…`) still exist on devnet but run the unpatched programs. Don't integrate against them.
 
 ### PDA derivations
 
@@ -157,24 +153,24 @@ The wrap is the public on-ramp: an ordinary SPL transfer from the user's ATA int
 
 Steps:
 
-1. `createInput(amount, fheType=4, authorized = pc-token program)` → `amountCt`. Poll `amountCt` account until `data[99] == 1` (reference: 750 ms interval, 60 s cap). Submitting before verification is the most common cause of "wrapped but balance is 0".
-2. Build and send the wrap transaction: CU limit 400 000 + the instruction below.
+1. Generate a fresh `amountCt` keypair. Don't call `createInput`: the program creates this ciphertext from the SPL `amount` itself, so the credit always equals what was deposited.
+2. Build the wrap transaction: CU limit 400 000 + the instruction below. `partialSign(amountCt)`, then the wallet signs.
 3. Wait for settlement: snapshot the balance CT's `data[2..34]` before sending; the wrap has settled when it changes (§8).
 
 **Wrap** — pc-token discriminator `30`, data = 10 bytes: `[30, cpiBump, amount as u64 LE]`.
 
 ```
-vault PDA               ro
+vault PDA               ro     [b"pc_vault", pcMint] of this pc-account's mint
 pcAccount PDA           ro
 userAta                 w
-vaultAta                w
+vaultAta                w      owned by SPL Token, mint = the vault's SPL mint
 balanceCt               w      (from pcAccount data[64..96])
-amountCt                w      (from createInput)
+amountCt                signer, w   fresh keypair (epoch 2)
 … Encrypt tail (payer = owner, signer)
 TOKEN_PROGRAM_ID        ro
 ```
 
-`amount == 0` is rejected. The reference client waits up to 90 s for the digest change and reports failure if it never moves — note the SPL has already left the user's ATA at that point; the pc-token balance will catch up when the executor commits.
+`amount == 0` is rejected, and so is a vault that doesn't belong to the pc-account's mint. The reference client waits up to 90 s for the digest change and reports failure if it never moves — note the SPL has already left the user's ATA at that point; the pc-token balance will catch up when the executor commits.
 
 Reference: `PcSwapClient.wrap()` (`pcSwap.ts`).
 
@@ -315,6 +311,8 @@ Other things to handle:
 - **Stale balance ciphertext** (all-zero digest): the executor never committed to this account. Wrap will still go through; swap should refuse. Surface it as "your deposit is still settling".
 - **RPC load.** Each settlement wait opens a WebSocket subscription and polls; a swap does two in parallel. The public devnet RPC will 429 you. Use your own provider.
 - **Rent leakage.** Each reveal creates a ciphertext account that isn't reclaimed today (~0.0023 SOL). Swap receipts and unwrap receipts are closed in-flow. This is a pre-alpha wart we've flagged upstream.
+- **Dropped transactions.** The devnet executor occasionally never processes a confirmed transaction (5 of 50 in one of our runs). Its output ciphertexts stay Pending forever, so a settlement wait can time out for good. Show "unknown", never "failed" or "succeeded".
+- **Ciphertexts can be overwritten through Encrypt.** On devnet today, the Encrypt program lets anyone name an existing ciphertext as the output of their own graph. Epoch 2 closes the holes in pc-token / pc-swap, but it can't stop a balance being rewritten through Encrypt directly. It has been reported to dWallet Labs. It's another reason this rail is devnet-only and holds no value.
 - **ACL is coarse.** In pre-alpha Encrypt, "authorized to compute on" equals "authorized to decrypt". Never authorize a balance copy to a key you don't control, and never call `make_public`/`request_decryption` on anything but your own reveal copies.
 
 ---
@@ -323,10 +321,12 @@ Other things to handle:
 
 Three instructions: burn an encrypted amount into a receipt, request decryption of the burned amount, then release SPL from the vault once the decrypted amount is verified on-chain.
 
-1. `createInput(amount, fheType=4, authorized = pc-token)` → `amountCt`; poll verified. Generate ephemeral `burnedCt`.
-2. **UnwrapBurn** — discriminator `31`, data = 11 bytes `[31, receiptBump, cpiBump, amount u64 LE]`. Accounts: `vault(ro)`, `pcAccount(w)`, `receiptPda(w) [b"pc_receipt", burnedCt]`, `balanceCt(w)`, `amountCt(w)`, `burnedCt(w)` + Encrypt tail. The graph computes `burned = balance ≥ amount ? amount : 0`.
-3. **UnwrapDecrypt** — discriminator `32`, data `[32, cpiBump]`. Accounts: `receipt(w)`, `requestAcct(signer, w)` (ephemeral), `burnedCt(ro)` + Encrypt tail with `encryptConfig` **read-only**. Wait for the executor to post the decryption (reference: poll up to 180 s).
-4. **UnwrapComplete** — discriminator `33`, data `[33]`. Accounts: `receipt(w)`, `vault(ro)`, `pcMint(ro)`, `requestAcct(ro)`, `vaultAta(w)`, `userAta(w)`, `owner(signer)`, `destination(w)`, `TOKEN_PROGRAM_ID(ro)`. If the decrypted `burned` ≠ requested amount (i.e. the user didn't have it), the receipt is closed and **no SPL is released — silently**.
+1. `createInput(amount, fheType=4, authorized = pc-token)` → `amountCt`; poll verified. Generate a fresh `burnedCt` keypair (the program creates it; epoch 2).
+2. **UnwrapBurn** — discriminator `31`, data = 11 bytes `[31, receiptBump, cpiBump, amount u64 LE]`. Accounts: `vault(ro)` (the PDA of this pc-account's mint), `pcAccount(w)`, `receiptPda(w) [b"pc_receipt", burnedCt]`, `balanceCt(w)`, `amountCt(w)`, `burnedCt(signer, w)` + Encrypt tail. `partialSign(burnedCt)`. The graph computes `burned = balance ≥ amount ? amount : 0`. The receipt (203 bytes) records `burnedCt`, the vault and the pc-mint.
+3. **UnwrapDecrypt** — discriminator `32`, data `[32, cpiBump]`. Accounts: `receipt(w)`, `requestAcct(signer, w)` (ephemeral), `burnedCt(ro)` + Encrypt tail with `encryptConfig` **read-only**. `burnedCt` must be the one on the receipt, and decryption can be requested only once per receipt, so persist `requestAcct` until step 4. Wait for the executor to post the decryption (reference: poll up to 180 s).
+4. **UnwrapComplete** — discriminator `33`, data `[33]`. Accounts: `receipt(w)`, `vault(ro)`, `pcMint(ro)`, `requestAcct(ro)`, `vaultAta(w)`, `userAta(w)`, `owner(signer)`, `destination(w)`, `TOKEN_PROGRAM_ID(ro)`. Vault, pc-mint and request must match the receipt. If the decrypted `burned` ≠ requested amount (i.e. the user didn't have it), the receipt is closed and **no SPL is released — silently**.
+
+If the executor never answers the decryption request, the burned amount stays stuck; there is no refund path in epoch 2. Don't put unwrap in a live demo.
 
 Reference implementation status: the deployed program supports all three; the upstream e2e suite has builders (`pc-token/e2e/instructions.ts`, `UnwrapBurn/Decrypt/Complete`). Our web demo doesn't expose unwrap yet; a browser-tested three-step client exists only for our legacy cold-storage variant (`pcTokenColdClient.ts`, same shape, different discriminators). The SDK will ship a tested `unwrap()`.
 
@@ -584,7 +584,9 @@ function buildWrapIx(
       { pubkey: userAta, isSigner: false, isWritable: true },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: balanceCt, isSigner: false, isWritable: true },
-      { pubkey: amountCt, isSigner: false, isWritable: true },
+      // Epoch 2: a fresh keypair. The program creates this ciphertext from `amount`
+      // itself, so the credit always equals the SPL deposited.
+      { pubkey: amountCt, isSigner: true, isWritable: true },
       ...encryptCpiAccountsList(encAccts, pcTokenProgram, cpiAuthority, owner),
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
@@ -816,9 +818,10 @@ export class PcSwapClient {
         if (initializingBalCt || depositIx) await new Promise((r) => setTimeout(r, 5000));
       }
 
-      // Encrypt the wrap amount, authorized to pc-token (caller of the wrap ix).
-      const amountCt = await this.encryptInputCt(amount, this.opts.pcTokenProgramId);
-      await this.pollVerifiedInputs([amountCt]);
+      // Epoch 2: no createInput for wrap. The amount ciphertext is a fresh keypair that
+      // pc-token initializes from the SPL amount, so there is nothing to poll.
+      const amountCtKp = Keypair.generate();
+      const amountCt = amountCtKp.publicKey;
 
       // Snapshot the bal CT digest *before* submitting the wrap — we'll wait for it to
       // change as the signal that the executor committed the new balance. For repeat
@@ -834,6 +837,7 @@ export class PcSwapClient {
         );
         wrapTx.feePayer = wallet;
         wrapTx.recentBlockhash = (await this.opts.connection.getLatestBlockhash('confirmed')).blockhash;
+        wrapTx.partialSign(amountCtKp);
         return this.opts.signAndSend(wrapTx);
       };
 
@@ -2508,13 +2512,18 @@ export function deriveVaultPda(
 }
 
 
-/** Instruction 23: InitializeVault */
+/**
+ * Instruction 23: InitializeVault.
+ * Epoch 2: the pc mint's authority must sign (trailing account), and
+ * `vaultBump` must be the canonical bump.
+ */
 export function initializeVaultIx(
   ctx: PcTokenContext,
   vaultPda: PublicKey,
   vaultBump: number,
   pcMint: PublicKey,
-  splMint: PublicKey
+  splMint: PublicKey,
+  mintAuthority: PublicKey
 ): TransactionInstruction {
   return new TransactionInstruction({
     programId: ctx.programId,
@@ -2525,11 +2534,16 @@ export function initializeVaultIx(
       { pubkey: splMint, isSigner: false, isWritable: false },
       { pubkey: ctx.payer, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: mintAuthority, isSigner: true, isWritable: false },
     ],
   });
 }
 
-/** Instruction 30: Wrap (deposit SPL → mint pcToken) */
+/**
+ * Instruction 30: Wrap (deposit SPL → mint pcToken).
+ * Epoch 2: `amountCt` is a FRESH keypair (partialSign it). The program
+ * creates it from `amount` after the SPL transfer; do not call createInput.
+ */
 export function wrapIx(
   ctx: PcTokenContext,
   vault: PublicKey,
@@ -2555,7 +2569,7 @@ export function wrapIx(
       { pubkey: userAta, isSigner: false, isWritable: true },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: balanceCt, isSigner: false, isWritable: true },
-      { pubkey: amountCt, isSigner: false, isWritable: true },
+      { pubkey: amountCt, isSigner: true, isWritable: true },
       ...encryptCpiAccounts(ctx.enc, ctx.programId, ctx.cpiAuthority, owner),
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
@@ -2568,7 +2582,11 @@ export function deriveReceiptPda(
   return pda([Buffer.from("pc_receipt"), burnedCt.toBuffer()], programId);
 }
 
-/** Instruction 31: UnwrapBurn */
+/**
+ * Instruction 31: UnwrapBurn.
+ * Epoch 2: `burnedCt` is a FRESH keypair (partialSign it); the program
+ * creates it. `amountCt` is still a client createInput (authorized to pc-token).
+ */
 export function unwrapBurnIx(
   ctx: PcTokenContext, vault: PublicKey, tokenAccount: PublicKey,
   receiptPda: PublicKey, receiptBump: number,
@@ -2586,13 +2604,16 @@ export function unwrapBurnIx(
       { pubkey: receiptPda, isSigner: false, isWritable: true },
       { pubkey: balanceCt, isSigner: false, isWritable: true },
       { pubkey: amountCt, isSigner: false, isWritable: true },
-      { pubkey: burnedCt, isSigner: false, isWritable: true },
+      { pubkey: burnedCt, isSigner: true, isWritable: true },
       ...encryptCpiAccounts(ctx.enc, ctx.programId, ctx.cpiAuthority, owner),
     ],
   });
 }
 
-/** Instruction 32: UnwrapDecrypt */
+/**
+ * Instruction 32: UnwrapDecrypt. Epoch 2: `burnedCt` must be the receipt's
+ * own burned ciphertext; decryption can be requested once per receipt.
+ */
 export function unwrapDecryptIx(
   ctx: PcTokenContext, receipt: PublicKey,
   requestAcct: PublicKey, burnedCt: PublicKey, owner: PublicKey
@@ -2609,7 +2630,10 @@ export function unwrapDecryptIx(
   });
 }
 
-/** Instruction 33: UnwrapComplete */
+/**
+ * Instruction 33: UnwrapComplete. Epoch 2: vault, pcMint and requestAcct must
+ * match the receipt; everything is checked before the receipt is closed.
+ */
 export function unwrapCompleteIx(
   programId: PublicKey, receipt: PublicKey, vault: PublicKey,
   pcMint: PublicKey, requestAcct: PublicKey,
@@ -2637,6 +2661,7 @@ export function unwrapCompleteIx(
 
 ```rust
 // Copyright (c) dWallet Labs, Ltd.
+// Copyright (c) 2026 Inkwell Finance (epoch-2 hardening)
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 
 #![allow(unexpected_cfgs)]
@@ -2650,6 +2675,17 @@ export function unwrapCompleteIx(
 /// are wrap/unwrap amounts at the SPL boundary, and those live on
 /// temporary WithdrawalReceipt accounts that get closed immediately.
 ///
+/// ## Epoch-2 hardening (Inkwell fork)
+///
+/// Every program account is loaded through `load`/`load_mut`: owned by this
+/// program and of the exact length of its type (the four layouts have
+/// distinct sizes, so a Vault cannot pass as a TokenAccount). The Encrypt
+/// program is a compile-time constant and `caller` must be this program, so
+/// the CPI-authority signature is never handed to anything else. Wrap mints
+/// a ciphertext the program creates from the SPL amount it just moved, and
+/// the unwrap steps are bound together by the receipt (burned ciphertext,
+/// vault, pc mint, decryption request).
+///
 /// ## Instructions (P-Token discriminators)
 ///
 ///  0. InitializeMint
@@ -2657,17 +2693,19 @@ export function unwrapCompleteIx(
 ///  3. Transfer (encrypted amount)
 ///  4. Approve (encrypted allowance)
 ///  5. Revoke
-///  7. MintTo (encrypted amount)
-///  8. Burn (encrypted amount)
-///  9. CloseAccount
 /// 10. FreezeAccount
 /// 11. ThawAccount
 /// 20. TransferFrom (delegate, composability)
-/// 23. InitializeVault
+/// 22. TransferWithReceipt
+/// 23. InitializeVault (requires the pc mint authority)
 /// 30. Wrap (SPL → pcToken)
 /// 31. UnwrapBurn (burn pcTokens + create withdrawal receipt)
 /// 32. UnwrapDecrypt (request decryption of burned amount)
 /// 33. UnwrapComplete (verify + release SPL tokens + close receipt)
+/// 40. ViewBalance (owner-authorized copy of the balance)
+///
+/// Standalone MintTo (7), Burn (8) and CloseAccount (9) are not implemented:
+/// tokens only enter through Wrap and only leave through Unwrap.
 use encrypt_dsl::prelude::encrypt_fn;
 use encrypt_pinocchio::accounts;
 use encrypt_pinocchio::EncryptContext;
@@ -2683,7 +2721,75 @@ use pinocchio_token::instructions::Transfer as SplTransfer;
 
 entrypoint!(process_instruction);
 
-pub const ID: Address = Address::new_from_array([5u8; 32]);
+// ── Program ids ──
+
+/// pc-token, devnet epoch 2: `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ`.
+pub const ID: Address = Address::new_from_array([
+    40, 235, 44, 158, 173, 253, 55, 205, 13, 122, 126, 12, 23, 135, 0, 47, 205, 91, 160, 69, 32,
+    176, 41, 50, 186, 139, 166, 110, 92, 232, 79, 4,
+]);
+
+/// Encrypt program on devnet: `4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8`.
+#[cfg(not(feature = "localnet"))]
+pub const ENCRYPT_ID: Address = Address::new_from_array([
+    54, 52, 193, 56, 216, 205, 66, 173, 150, 219, 76, 71, 2, 69, 247, 186, 158, 244, 102, 172,
+    211, 224, 217, 69, 221, 212, 114, 161, 199, 34, 86, 139,
+]);
+
+/// Encrypt program as deployed by the `encrypt-solana-test` LiteSVM harness:
+/// `Cq37zHSH1zB6xomYK2LjP6uXJvLR3uTehxA5W9wgHGvx`.
+#[cfg(feature = "localnet")]
+pub const ENCRYPT_ID: Address = Address::new_from_array([
+    175, 190, 213, 40, 242, 81, 150, 134, 222, 39, 3, 15, 110, 91, 65, 64, 171, 126, 206, 36,
+    245, 170, 97, 22, 255, 187, 65, 204, 51, 109, 125, 133,
+]);
+
+/// SPL Token program.
+pub const SPL_TOKEN_ID: Address = pinocchio_token::ID;
+/// System program.
+pub const SYSTEM_ID: Address = Address::new_from_array([0u8; 32]);
+
+/// Length of an SPL Token account (`spl_token::state::Account::LEN`).
+const SPL_ACCOUNT_LEN: usize = 165;
+/// Length of an SPL Token mint (`spl_token::state::Mint::LEN`).
+const SPL_MINT_LEN: usize = 82;
+
+// ── Errors ──
+
+/// Custom error codes added by the epoch-2 hardening. Values are stable ABI.
+pub mod err {
+    use pinocchio::error::ProgramError;
+    /// The Encrypt program account is not the pinned Encrypt program.
+    pub const FOREIGN_ENCRYPT: ProgramError = ProgramError::Custom(0x100);
+    /// `caller` is not this program.
+    pub const WRONG_CALLER: ProgramError = ProgramError::Custom(0x101);
+    /// The vault is not the canonical vault PDA of the token account's mint.
+    pub const BAD_VAULT: ProgramError = ProgramError::Custom(0x102);
+    /// The vault SPL account is not an SPL account of the vault's mint owned by the vault.
+    pub const BAD_VAULT_ATA: ProgramError = ProgramError::Custom(0x103);
+    /// The token program account is not SPL Token.
+    pub const BAD_TOKEN_PROGRAM: ProgramError = ProgramError::Custom(0x104);
+    /// An account that the program creates is not a fresh, empty, signing system account.
+    pub const NOT_FRESH: ProgramError = ProgramError::Custom(0x105);
+    /// The account does not match the one recorded in the withdrawal receipt.
+    pub const RECEIPT_MISMATCH: ProgramError = ProgramError::Custom(0x106);
+    /// Decryption was already requested for this receipt.
+    pub const DECRYPT_ALREADY_REQUESTED: ProgramError = ProgramError::Custom(0x107);
+    /// UnwrapComplete before UnwrapDecrypt.
+    pub const DECRYPT_NOT_REQUESTED: ProgramError = ProgramError::Custom(0x108);
+    /// Two slots that must differ name the same account.
+    pub const ALIASED: ProgramError = ProgramError::Custom(0x109);
+    /// A user-supplied bump is not the canonical bump of its PDA.
+    pub const NON_CANONICAL_BUMP: ProgramError = ProgramError::Custom(0x10A);
+    /// The decryption request is not owned by Encrypt.
+    pub const BAD_REQUEST: ProgramError = ProgramError::Custom(0x10B);
+    /// The signer is not the pc mint authority.
+    pub const NOT_MINT_AUTHORITY: ProgramError = ProgramError::Custom(0x10C);
+    /// A delegate is already set; Revoke first.
+    pub const DELEGATE_SET: ProgramError = ProgramError::Custom(0x10D);
+    /// The SPL mint account is not an SPL Token mint.
+    pub const BAD_SPL_MINT: ProgramError = ProgramError::Custom(0x10E);
+}
 
 // ── AccountState ──
 
@@ -2697,6 +2803,15 @@ const COPTION_SOME: [u8; 4] = [1, 0, 0, 0];
 
 // ── Account layouts ──
 
+/// A fixed-size, byte-aligned account layout owned by this program.
+///
+/// # Safety
+/// Implementors must be `#[repr(C)]` with alignment 1 and no padding, so any
+/// `LEN`-byte buffer is a valid value.
+pub unsafe trait Layout: Sized {
+    const LEN: usize = core::mem::size_of::<Self>();
+}
+
 #[repr(C)]
 pub struct Mint {
     pub mint_authority_flag: [u8; 4],
@@ -2707,10 +2822,9 @@ pub struct Mint {
     pub freeze_authority: [u8; 32],
     pub bump: u8,
 }
+unsafe impl Layout for Mint {}
 impl Mint {
-    pub const LEN: usize = core::mem::size_of::<Self>();
-    pub fn from_bytes(d: &[u8]) -> Result<&Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &*(d.as_ptr() as *const Self) }) }
-    pub fn from_bytes_mut(d: &mut [u8]) -> Result<&mut Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &mut *(d.as_mut_ptr() as *mut Self) }) }
+    pub const LEN: usize = <Self as Layout>::LEN;
     pub fn is_initialized(&self) -> bool { self.is_initialized == 1 }
     pub fn has_mint_authority(&self) -> bool { self.mint_authority_flag == COPTION_SOME }
     pub fn has_freeze_authority(&self) -> bool { self.freeze_authority_flag == COPTION_SOME }
@@ -2730,42 +2844,159 @@ pub struct TokenAccount {
     pub close_authority: [u8; 32],
     pub bump: u8,
 }
+unsafe impl Layout for TokenAccount {}
 impl TokenAccount {
-    pub const LEN: usize = core::mem::size_of::<Self>();
-    pub fn from_bytes(d: &[u8]) -> Result<&Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &*(d.as_ptr() as *const Self) }) }
-    pub fn from_bytes_mut(d: &mut [u8]) -> Result<&mut Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &mut *(d.as_mut_ptr() as *mut Self) }) }
+    pub const LEN: usize = <Self as Layout>::LEN;
     pub fn is_frozen(&self) -> bool { self.state == AccountState::Frozen as u8 }
     pub fn is_initialized(&self) -> bool { self.state != AccountState::Uninitialized as u8 }
     pub fn has_delegate(&self) -> bool { self.delegate_flag == COPTION_SOME }
     pub fn has_close_authority(&self) -> bool { self.close_authority_flag == COPTION_SOME }
 }
 
+/// Vault — PDA `["pc_vault", pc_mint]`. Layout unchanged from upstream.
 #[repr(C)]
 pub struct Vault { pub spl_mint: [u8; 32], pub bump: u8 }
-impl Vault {
-    pub const LEN: usize = core::mem::size_of::<Self>();
-    pub fn from_bytes(d: &[u8]) -> Result<&Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &*(d.as_ptr() as *const Self) }) }
-    pub fn from_bytes_mut(d: &mut [u8]) -> Result<&mut Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &mut *(d.as_mut_ptr() as *mut Self) }) }
-}
+unsafe impl Layout for Vault {}
+impl Vault { pub const LEN: usize = <Self as Layout>::LEN; }
 
-/// Temporary receipt for unwrap — stores only the withdrawal amount + digest.
-/// PDA: `["pc_receipt", burned_ct]`. Closed after unwrap completes.
+/// Temporary receipt for unwrap. PDA: `["pc_receipt", burned_ct]`. Closed by
+/// UnwrapComplete. Epoch 2 binds every later step to this receipt: the burned
+/// ciphertext, the vault and pc mint it may pay out of, and the decryption
+/// request it may be completed with.
 #[repr(C)]
 pub struct WithdrawalReceipt {
     pub owner: [u8; 32],
     pub amount: [u8; 8],           // requested plaintext amount
-    pub pending_digest: [u8; 32],  // digest for decryption verification
+    pub pending_digest: [u8; 32],  // digest of burned_ct at decryption request
     pub bump: u8,
+    pub burned_ct: [u8; 32],
+    pub vault: [u8; 32],
+    pub pc_mint: [u8; 32],
+    pub request: [u8; 32],         // decryption request account, set by UnwrapDecrypt
+    pub decrypt_requested: u8,
+    /// Layout version (1). Also keeps the length distinct from TokenAccount's.
+    pub version: u8,
 }
+unsafe impl Layout for WithdrawalReceipt {}
 impl WithdrawalReceipt {
-    pub const LEN: usize = core::mem::size_of::<Self>();
-    pub fn from_bytes(d: &[u8]) -> Result<&Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &*(d.as_ptr() as *const Self) }) }
-    pub fn from_bytes_mut(d: &mut [u8]) -> Result<&mut Self, ProgramError> { if d.len() < Self::LEN { return Err(ProgramError::InvalidAccountData); } Ok(unsafe { &mut *(d.as_mut_ptr() as *mut Self) }) }
+    pub const LEN: usize = <Self as Layout>::LEN;
     pub fn requested_amount(&self) -> u64 { u64::from_le_bytes(self.amount) }
+}
+
+// Distinct lengths are what make the length check a type check.
+const _: () = {
+    assert!(Mint::LEN == 75);
+    assert!(TokenAccount::LEN == 202);
+    assert!(Vault::LEN == 33);
+    assert!(WithdrawalReceipt::LEN == 203);
+    assert!(core::mem::align_of::<Mint>() == 1);
+    assert!(core::mem::align_of::<TokenAccount>() == 1);
+    assert!(core::mem::align_of::<Vault>() == 1);
+    assert!(core::mem::align_of::<WithdrawalReceipt>() == 1);
+};
+
+// ── Validation helpers ──
+
+/// Load a program account: owned by `program_id`, exact length of `T`.
+pub fn load<'a, T: Layout>(acct: &'a AccountView, program_id: &Address) -> Result<&'a T, ProgramError> {
+    if !acct.owned_by(program_id) { return Err(ProgramError::IncorrectProgramId); }
+    let d = unsafe { acct.borrow_unchecked() };
+    if d.len() != T::LEN { return Err(ProgramError::InvalidAccountData); }
+    Ok(unsafe { &*(d.as_ptr() as *const T) })
+}
+
+/// Mutable variant of [`load`]; also requires the account to be writable.
+pub fn load_mut<'a, T: Layout>(acct: &'a AccountView, program_id: &Address) -> Result<&'a mut T, ProgramError> {
+    if !acct.is_writable() { return Err(ProgramError::InvalidArgument); }
+    if !acct.owned_by(program_id) { return Err(ProgramError::IncorrectProgramId); }
+    let d = unsafe { acct.borrow_unchecked_mut() };
+    if d.len() != T::LEN { return Err(ProgramError::InvalidAccountData); }
+    Ok(unsafe { &mut *(d.as_mut_ptr() as *mut T) })
+}
+
+/// Initialize a freshly created program account.
+fn init_mut<'a, T: Layout>(acct: &'a AccountView) -> Result<&'a mut T, ProgramError> {
+    let d = unsafe { acct.borrow_unchecked_mut() };
+    if d.len() != T::LEN { return Err(ProgramError::InvalidAccountData); }
+    Ok(unsafe { &mut *(d.as_mut_ptr() as *mut T) })
+}
+
+/// Every address in `accts` must be distinct.
+pub fn distinct(accts: &[&AccountView]) -> ProgramResult {
+    for (i, a) in accts.iter().enumerate() {
+        for b in &accts[i + 1..] {
+            if a.address() == b.address() { return Err(err::ALIASED); }
+        }
+    }
+    Ok(())
+}
+
+/// An account the program (or Encrypt, on its behalf) is about to create:
+/// signing, empty, system-owned.
+pub fn require_fresh(acct: &AccountView) -> ProgramResult {
+    if !acct.is_signer() || acct.data_len() != 0 || !acct.owned_by(&SYSTEM_ID) { return Err(err::NOT_FRESH); }
+    Ok(())
+}
+
+/// `bump` must be the canonical bump of `seeds` under `program_id`, and the
+/// derived address must be `expected`.
+pub fn require_canonical(seeds: &[&[u8]], bump: u8, program_id: &Address, expected: &AccountView) -> ProgramResult {
+    let (addr, canonical) = Address::find_program_address(seeds, program_id);
+    if canonical != bump { return Err(err::NON_CANONICAL_BUMP); }
+    if &addr != expected.address() { return Err(ProgramError::InvalidSeeds); }
+    Ok(())
+}
+
+/// The vault must be the PDA `["pc_vault", pc_mint, vault.bump]`.
+fn require_vault_of(vault_acct: &AccountView, vault: &Vault, pc_mint: &[u8; 32], program_id: &Address) -> ProgramResult {
+    let derived = Address::create_program_address(&[b"pc_vault", pc_mint, &[vault.bump]], program_id)
+        .map_err(|_| err::BAD_VAULT)?;
+    if &derived != vault_acct.address() { return Err(err::BAD_VAULT); }
+    Ok(())
+}
+
+/// The vault's SPL account: owned by SPL Token, an initialized token account
+/// of the vault's SPL mint, whose token owner is the vault PDA.
+fn require_vault_ata(vault_ata: &AccountView, vault_acct: &AccountView, vault: &Vault) -> ProgramResult {
+    if !vault_ata.owned_by(&SPL_TOKEN_ID) { return Err(err::BAD_VAULT_ATA); }
+    let d = unsafe { vault_ata.borrow_unchecked() };
+    if d.len() != SPL_ACCOUNT_LEN { return Err(err::BAD_VAULT_ATA); }
+    if d[0..32] != vault.spl_mint { return Err(err::BAD_VAULT_ATA); }
+    if &d[32..64] != vault_acct.address().as_ref() { return Err(err::BAD_VAULT_ATA); }
+    Ok(())
+}
+
+fn require_token_program(acct: &AccountView) -> ProgramResult {
+    if acct.address() != &SPL_TOKEN_ID { return Err(err::BAD_TOKEN_PROGRAM); }
+    Ok(())
+}
+
+/// Build the Encrypt CPI context after pinning the Encrypt program, the
+/// caller (this program) and the system program.
+#[allow(clippy::too_many_arguments)]
+fn encrypt_ctx<'a>(
+    program_id: &Address,
+    ep: &'a AccountView, cfg: &'a AccountView, dep: &'a AccountView, cpi_auth: &'a AccountView,
+    caller: &'a AccountView, nk: &'a AccountView, payer: &'a AccountView, evt: &'a AccountView,
+    sys: &'a AccountView, cpi_bump: u8,
+) -> Result<EncryptContext<'a>, ProgramError> {
+    if ep.address() != &ENCRYPT_ID { return Err(err::FOREIGN_ENCRYPT); }
+    if caller.address() != program_id { return Err(err::WRONG_CALLER); }
+    if sys.address() != &SYSTEM_ID { return Err(ProgramError::IncorrectProgramId); }
+    Ok(EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer, event_authority: evt, system_program: sys, cpi_authority_bump: cpi_bump })
 }
 
 fn minimum_balance(s: usize) -> u64 { (s as u64 + 128) * 6960 }
 fn assert_not_frozen(ta: &TokenAccount) -> ProgramResult { if ta.is_frozen() { Err(ProgramError::Custom(0x11)) } else { Ok(()) } }
+
+/// Load an initialized, unfrozen token account and check its balance slot.
+fn load_live_account<'a>(ta_acct: &'a AccountView, bal_ct: &AccountView, program_id: &Address) -> Result<&'a TokenAccount, ProgramError> {
+    let ta = load::<TokenAccount>(ta_acct, program_id)?;
+    if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
+    assert_not_frozen(ta)?;
+    if bal_ct.address().as_array() != ta.balance.id() { return Err(ProgramError::InvalidArgument); }
+    Ok(ta)
+}
 
 // ── FHE Graphs ──
 
@@ -2776,10 +3007,6 @@ fn assert_not_frozen(ta: &TokenAccount) -> ProgramResult { if ta.is_frozen() { E
     let nf = if s { from_balance - amount } else { from_balance };
     let nt = if s { to_balance + amount } else { to_balance };
     (nf, nt)
-}
-
-#[encrypt_fn] fn burn_graph(balance: EUint64, amount: EUint64) -> EUint64 {
-    let s = balance >= amount; if s { balance - amount } else { balance }
 }
 
 #[encrypt_fn] fn transfer_from_graph(from_balance: EUint64, to_balance: EUint64, allowance: EUint64, amount: EUint64) -> (EUint64, EUint64, EUint64) {
@@ -2818,44 +3045,50 @@ fn process_instruction(program_id: &Address, accounts: &[AccountView], data: &[u
     match data.split_first() {
         Some((&0, rest)) => initialize_mint(program_id, accounts, rest),
         Some((&1, rest)) => initialize_account(program_id, accounts, rest),
-        Some((&3, rest)) => transfer(accounts, rest),
-        Some((&4, rest)) => approve(accounts, rest),
-        Some((&5, rest)) => revoke(accounts, rest),
+        Some((&3, rest)) => transfer(program_id, accounts, rest),
+        Some((&4, rest)) => approve(program_id, accounts, rest),
+        Some((&5, rest)) => revoke(program_id, accounts, rest),
         // No standalone MintTo — tokens can only enter through Wrap (vault-backed)
         // No standalone Burn — tokens can only exit through Unwrap (releases backing SPL)
-        Some((&10, rest)) => freeze_account(accounts, rest),
-        Some((&11, rest)) => thaw_account(accounts, rest),
-        Some((&20, rest)) => transfer_from(accounts, rest),
-        Some((&22, rest)) => transfer_with_receipt(accounts, rest),
+        Some((&10, rest)) => freeze_account(program_id, accounts, rest),
+        Some((&11, rest)) => thaw_account(program_id, accounts, rest),
+        Some((&20, rest)) => transfer_from(program_id, accounts, rest),
+        Some((&22, rest)) => transfer_with_receipt(program_id, accounts, rest),
         Some((&23, rest)) => initialize_vault(program_id, accounts, rest),
-        Some((&30, rest)) => wrap(accounts, rest),
+        Some((&30, rest)) => wrap(program_id, accounts, rest),
         Some((&31, rest)) => unwrap_burn(program_id, accounts, rest),
-        Some((&32, rest)) => unwrap_decrypt(accounts, rest),
-        Some((&33, _rest)) => unwrap_complete(accounts),
+        Some((&32, rest)) => unwrap_decrypt(program_id, accounts, rest),
+        Some((&33, _rest)) => unwrap_complete(program_id, accounts),
         // 40: ViewBalance — fork-only addition (Inkwell). Lets the account owner produce a
         // wallet-authorized copy of their encrypted balance so they can read it via gRPC.
-        // Without this, balance_ct.authorized = PC-Token program → no wallet can decrypt
-        // off-chain. PR worth shipping upstream once Encrypt Alpha 1 stabilizes the read flow.
-        Some((&40, rest)) => view_balance(accounts, rest),
+        Some((&40, rest)) => view_balance(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
 
 // ── 0: InitializeMint ──
+// Accounts: [mint (w), authority (s), payer (s, w), system]
+// Data: [bump, decimals, mint_authority(32), has_freeze, freeze_authority(32)?]
+//   The flag byte may be omitted (no freeze authority). With the flag set the
+//   freeze authority is required (the upstream length check was off by one).
 
 fn initialize_mint(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    let [mint_acct, authority, payer, _sys, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys); };
+    let [mint_acct, authority, payer, sys, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !authority.is_signer() || !payer.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
+    if sys.address() != &SYSTEM_ID { return Err(ProgramError::IncorrectProgramId); }
     if data.len() < 34 { return Err(ProgramError::InvalidInstructionData); }
     let (bump, decimals) = (data[0], data[1]);
     let mint_authority: [u8; 32] = data[2..34].try_into().unwrap();
     let has_freeze = data.len() > 34 && data[34] != 0;
-    let freeze_authority: [u8; 32] = if has_freeze && data.len() >= 66 { data[35..67].try_into().unwrap() } else { [0u8; 32] };
+    let freeze_authority: [u8; 32] = if has_freeze {
+        if data.len() < 67 { return Err(ProgramError::InvalidInstructionData); }
+        data[35..67].try_into().unwrap()
+    } else { [0u8; 32] };
+    require_canonical(&[b"pc_mint", authority.address().as_ref()], bump, program_id, mint_acct)?;
     let bb = [bump];
     let seeds = [Seed::from(b"pc_mint" as &[u8]), Seed::from(authority.address().as_ref()), Seed::from(&bb)];
     CreateAccount { from: payer, to: mint_acct, lamports: minimum_balance(Mint::LEN), space: Mint::LEN as u64, owner: program_id }.invoke_signed(&[Signer::from(&seeds)])?;
-    let d = unsafe { mint_acct.borrow_unchecked_mut() };
-    let m = Mint::from_bytes_mut(d)?;
+    let m = init_mut::<Mint>(mint_acct)?;
     m.mint_authority_flag = COPTION_SOME; m.mint_authority.copy_from_slice(&mint_authority);
     m.decimals = decimals; m.is_initialized = 1;
     if has_freeze { m.freeze_authority_flag = COPTION_SOME; m.freeze_authority.copy_from_slice(&freeze_authority); }
@@ -2864,6 +3097,7 @@ fn initialize_mint(program_id: &Address, accounts: &[AccountView], data: &[u8]) 
 }
 
 // ── 1: InitializeAccount ──
+// Accounts: [ta (w), mint, owner, bal_ct (fresh signer), ep, cfg, dep, cpi_auth, caller, nk, payer (s), evt, sys]
 
 fn initialize_account(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [ta_acct, mint_acct, owner, bal_ct, ep, cfg, dep, cpi_auth, caller, nk, payer, evt, sys, ..] = accounts
@@ -2871,15 +3105,15 @@ fn initialize_account(program_id: &Address, accounts: &[AccountView], data: &[u8
     if !payer.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.len() < 2 { return Err(ProgramError::InvalidInstructionData); }
     let (ab, cb) = (data[0], data[1]);
-    let md = unsafe { mint_acct.borrow_unchecked() };
-    if !Mint::from_bytes(md)?.is_initialized() { return Err(ProgramError::UninitializedAccount); }
+    if !load::<Mint>(mint_acct, program_id)?.is_initialized() { return Err(ProgramError::UninitializedAccount); }
+    require_fresh(bal_ct)?;
+    require_canonical(&[b"pc_account", mint_acct.address().as_ref(), owner.address().as_ref()], ab, program_id, ta_acct)?;
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, payer, evt, sys, cb)?;
     let bb = [ab];
     let seeds = [Seed::from(b"pc_account" as &[u8]), Seed::from(mint_acct.address().as_ref()), Seed::from(owner.address().as_ref()), Seed::from(&bb)];
     CreateAccount { from: payer, to: ta_acct, lamports: minimum_balance(TokenAccount::LEN), space: TokenAccount::LEN as u64, owner: program_id }.invoke_signed(&[Signer::from(&seeds)])?;
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer, event_authority: evt, system_program: sys, cpi_authority_bump: cb };
     ctx.create_plaintext_typed::<Uint64>(&0u64, bal_ct)?;
-    let d = unsafe { ta_acct.borrow_unchecked_mut() };
-    let ta = TokenAccount::from_bytes_mut(d)?;
+    let ta = init_mut::<TokenAccount>(ta_acct)?;
     ta.mint.copy_from_slice(mint_acct.address().as_ref());
     ta.owner.copy_from_slice(owner.address().as_ref());
     ta.balance = EUint64::from_le_bytes(*bal_ct.address().as_array());
@@ -2890,46 +3124,23 @@ fn initialize_account(program_id: &Address, accounts: &[AccountView], data: &[u8
     ta.bump = ab; Ok(())
 }
 
-// ── 7: MintTo ──
-
-fn mint_to(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    let [mint_acct, ta_acct, bal_ct, amt_ct, ep, cfg, dep, cpi_auth, caller, nk, authority, evt, sys, ..] = accounts
-    else { return Err(ProgramError::NotEnoughAccountKeys); };
-    if !authority.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
-    if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let md = unsafe { mint_acct.borrow_unchecked() };
-    let m = Mint::from_bytes(md)?;
-    if !m.has_mint_authority() || authority.address().as_array() != &m.mint_authority { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
-    if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ta)?;
-    if &ta.mint != mint_acct.address().as_array() { return Err(ProgramError::InvalidArgument); }
-    if bal_ct.address().as_array() != ta.balance.id() { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: authority, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
-    ctx.mint_to_graph(bal_ct, amt_ct, bal_ct)?; Ok(())
-}
-
 // ── 3: Transfer ──
+// Accounts: [from, to, from_ct (w), to_ct (w), amt_ct (w), ep, cfg, dep, cpi_auth, caller, nk, owner (s), evt, sys]
 
-fn transfer(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn transfer(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [from_acct, to_acct, from_ct, to_ct, amt_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let fd = unsafe { from_acct.borrow_unchecked() };
-    let ft = TokenAccount::from_bytes(fd)?;
-    if !ft.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ft)?;
+    // A self-transfer would write both graph outputs to one ciphertext and
+    // keep the credit: reject every alias.
+    distinct(&[from_acct, to_acct])?;
+    distinct(&[from_ct, to_ct, amt_ct])?;
+    let ft = load_live_account(from_acct, from_ct, program_id)?;
     if owner.address().as_array() != &ft.owner { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { to_acct.borrow_unchecked() };
-    let tt = TokenAccount::from_bytes(td)?;
-    if !tt.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(tt)?;
+    let tt = load_live_account(to_acct, to_ct, program_id)?;
     if ft.mint != tt.mint { return Err(ProgramError::InvalidArgument); }
-    if from_ct.address().as_array() != ft.balance.id() { return Err(ProgramError::InvalidArgument); }
-    if to_ct.address().as_array() != tt.balance.id() { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, data[0])?;
     ctx.transfer_graph(from_ct, to_ct, amt_ct, from_ct, to_ct)?; Ok(())
 }
 
@@ -2945,25 +3156,23 @@ fn transfer(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
 // consent for that trust relationship. (The principled fix lives in the
 // encrypt program: split authorized into compute_authorized /
 // decrypt_authorized.)
+//
+// Accounts: [from, to, from_ct, to_ct, amt_ct, receipt_ct (fresh signer), target_program,
+//            ep, cfg, dep, cpi_auth, caller, nk, owner (s), evt, sys]
 
-fn transfer_with_receipt(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn transfer_with_receipt(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [from_acct, to_acct, from_ct, to_ct, amt_ct, receipt_ct, target_program, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let fd = unsafe { from_acct.borrow_unchecked() };
-    let ft = TokenAccount::from_bytes(fd)?;
-    if !ft.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ft)?;
+    distinct(&[from_acct, to_acct])?;
+    distinct(&[from_ct, to_ct, amt_ct, receipt_ct])?;
+    require_fresh(receipt_ct)?;
+    let ft = load_live_account(from_acct, from_ct, program_id)?;
     if owner.address().as_array() != &ft.owner { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { to_acct.borrow_unchecked() };
-    let tt = TokenAccount::from_bytes(td)?;
-    if !tt.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(tt)?;
+    let tt = load_live_account(to_acct, to_ct, program_id)?;
     if ft.mint != tt.mint { return Err(ProgramError::InvalidArgument); }
-    if from_ct.address().as_array() != ft.balance.id() { return Err(ProgramError::InvalidArgument); }
-    if to_ct.address().as_array() != tt.balance.id() { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, data[0])?;
     ctx.create_plaintext_typed::<Uint64>(&0u64, receipt_ct)?;
     ctx.transfer_receipt_graph(from_ct, to_ct, amt_ct, from_ct, to_ct, receipt_ct)?;
     ctx.transfer_ciphertext(receipt_ct, target_program)?;
@@ -2971,167 +3180,158 @@ fn transfer_with_receipt(accounts: &[AccountView], data: &[u8]) -> ProgramResult
 }
 
 // ── 4: Approve ──
+// Accounts: [ta (w), delegate, amt_ct, allow_ct (fresh signer), ep, cfg, dep, cpi_auth, caller, nk, owner (s), evt, sys]
+// Refused while a delegate is set (Revoke first), so an old allowance
+// ciphertext is never orphaned.
 
-fn approve(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn approve(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [ta_acct, delegate, amt_ct, allow_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
+    distinct(&[amt_ct, allow_ct])?;
+    require_fresh(allow_ct)?;
+    let ta = load_mut::<TokenAccount>(ta_acct, program_id)?;
     if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
     assert_not_frozen(ta)?;
     if owner.address().as_array() != &ta.owner { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
+    if ta.has_delegate() { return Err(err::DELEGATE_SET); }
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, data[0])?;
     ctx.create_plaintext_typed::<Uint64>(&0u64, allow_ct)?;
     ctx.mint_to_graph(allow_ct, amt_ct, allow_ct)?;
-    let td2 = unsafe { ta_acct.borrow_unchecked_mut() };
-    let ta2 = TokenAccount::from_bytes_mut(td2)?;
-    ta2.delegate_flag = COPTION_SOME;
-    ta2.delegate.copy_from_slice(delegate.address().as_ref());
-    ta2.allowance = EUint64::from_le_bytes(*allow_ct.address().as_array());
+    ta.delegate_flag = COPTION_SOME;
+    ta.delegate.copy_from_slice(delegate.address().as_ref());
+    ta.allowance = EUint64::from_le_bytes(*allow_ct.address().as_array());
     Ok(())
 }
 
 // ── 5: Revoke ──
+// Accounts: [ta (w), allow_ct (w), owner (s), ep, cfg, dep, cpi_auth, caller, nk, payer (s), evt, sys]
 
-fn revoke(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn revoke(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [ta_acct, allow_ct, owner, ep, cfg, dep, cpi_auth, caller, nk, payer, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
+    let ta = load_mut::<TokenAccount>(ta_acct, program_id)?;
     if owner.address().as_array() != &ta.owner { return Err(ProgramError::InvalidArgument); }
     if !ta.has_delegate() { return Err(ProgramError::InvalidArgument); }
     if allow_ct.address().as_array() != ta.allowance.id() { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, payer, evt, sys, data[0])?;
     ctx.close_ciphertext(allow_ct, payer)?;
-    let td2 = unsafe { ta_acct.borrow_unchecked_mut() };
-    let ta2 = TokenAccount::from_bytes_mut(td2)?;
-    ta2.delegate_flag = COPTION_NONE; ta2.delegate = [0u8; 32]; ta2.allowance = EUint64::from_le_bytes([0u8; 32]); Ok(())
-}
-
-// ── 8: Burn ──
-
-fn burn(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    let [ta_acct, mint_acct, bal_ct, amt_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
-    else { return Err(ProgramError::NotEnoughAccountKeys); };
-    if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
-    if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
-    if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ta)?;
-    if owner.address().as_array() != &ta.owner { return Err(ProgramError::InvalidArgument); }
-    if &ta.mint != mint_acct.address().as_array() { return Err(ProgramError::InvalidArgument); }
-    if bal_ct.address().as_array() != ta.balance.id() { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
-    ctx.burn_graph(bal_ct, amt_ct, bal_ct)?; Ok(())
+    ta.delegate_flag = COPTION_NONE; ta.delegate = [0u8; 32]; ta.allowance = EUint64::from_le_bytes([0u8; 32]); Ok(())
 }
 
 // ── 10: FreezeAccount ──
 
-fn freeze_account(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
+fn freeze_account(program_id: &Address, accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [ta_acct, mint_acct, freeze_auth, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !freeze_auth.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
-    let md = unsafe { mint_acct.borrow_unchecked() };
-    let m = Mint::from_bytes(md)?;
+    let m = load::<Mint>(mint_acct, program_id)?;
     if !m.has_freeze_authority() || freeze_auth.address().as_array() != &m.freeze_authority { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
+    let ta = load_mut::<TokenAccount>(ta_acct, program_id)?;
     if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
     if &ta.mint != mint_acct.address().as_array() { return Err(ProgramError::InvalidArgument); }
-    let td2 = unsafe { ta_acct.borrow_unchecked_mut() };
-    TokenAccount::from_bytes_mut(td2)?.state = AccountState::Frozen as u8; Ok(())
+    ta.state = AccountState::Frozen as u8; Ok(())
 }
 
 // ── 11: ThawAccount ──
 
-fn thaw_account(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
+fn thaw_account(program_id: &Address, accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [ta_acct, mint_acct, freeze_auth, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !freeze_auth.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
-    let md = unsafe { mint_acct.borrow_unchecked() };
-    let m = Mint::from_bytes(md)?;
+    let m = load::<Mint>(mint_acct, program_id)?;
     if !m.has_freeze_authority() || freeze_auth.address().as_array() != &m.freeze_authority { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
+    let ta = load_mut::<TokenAccount>(ta_acct, program_id)?;
     if !ta.is_frozen() { return Err(ProgramError::InvalidArgument); }
     if &ta.mint != mint_acct.address().as_array() { return Err(ProgramError::InvalidArgument); }
-    let td2 = unsafe { ta_acct.borrow_unchecked_mut() };
-    TokenAccount::from_bytes_mut(td2)?.state = AccountState::Initialized as u8; Ok(())
+    ta.state = AccountState::Initialized as u8; Ok(())
 }
 
 // ── 20: TransferFrom ──
+// Accounts: [from, to, from_ct, to_ct, allow_ct, amt_ct, delegate (s), ep, cfg, dep, cpi_auth, caller, nk, payer (s), evt, sys]
 
-fn transfer_from(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn transfer_from(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [from_acct, to_acct, from_ct, to_ct, allow_ct, amt_ct, delegate, ep, cfg, dep, cpi_auth, caller, nk, payer, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !delegate.is_signer() || !payer.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let fd = unsafe { from_acct.borrow_unchecked() };
-    let ft = TokenAccount::from_bytes(fd)?;
-    if !ft.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ft)?;
+    distinct(&[from_acct, to_acct])?;
+    distinct(&[from_ct, to_ct, allow_ct, amt_ct])?;
+    let ft = load_live_account(from_acct, from_ct, program_id)?;
     if !ft.has_delegate() || delegate.address().as_array() != &ft.delegate { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { to_acct.borrow_unchecked() };
-    let tt = TokenAccount::from_bytes(td)?;
-    if !tt.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(tt)?;
-    if ft.mint != tt.mint { return Err(ProgramError::InvalidArgument); }
-    if from_ct.address().as_array() != ft.balance.id() { return Err(ProgramError::InvalidArgument); }
-    if to_ct.address().as_array() != tt.balance.id() { return Err(ProgramError::InvalidArgument); }
     if allow_ct.address().as_array() != ft.allowance.id() { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
+    let tt = load_live_account(to_acct, to_ct, program_id)?;
+    if ft.mint != tt.mint { return Err(ProgramError::InvalidArgument); }
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, payer, evt, sys, data[0])?;
     ctx.transfer_from_graph(from_ct, to_ct, allow_ct, amt_ct, from_ct, to_ct, allow_ct)?; Ok(())
 }
 
 // ── 23: InitializeVault ──
+// Accounts: [vault (w), pc_mint, spl_mint, payer (s), system, mint_authority (s)]
+// Data: [vault_bump]
+// Epoch 2: only the pc mint's authority may bind a vault (and so the backing
+// SPL mint) to a pc mint, and the bump must be canonical.
 
 fn initialize_vault(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    let [vault_acct, pc_mint, spl_mint, payer, _sys, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys); };
-    if !payer.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
+    let [vault_acct, pc_mint, spl_mint, payer, sys, mint_authority, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys); };
+    if !payer.is_signer() || !mint_authority.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
+    if sys.address() != &SYSTEM_ID { return Err(ProgramError::IncorrectProgramId); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let vb = data[0]; let md = unsafe { pc_mint.borrow_unchecked() };
-    if !Mint::from_bytes(md)?.is_initialized() { return Err(ProgramError::UninitializedAccount); }
+    let vb = data[0];
+    let m = load::<Mint>(pc_mint, program_id)?;
+    if !m.is_initialized() { return Err(ProgramError::UninitializedAccount); }
+    if !m.has_mint_authority() || mint_authority.address().as_array() != &m.mint_authority { return Err(err::NOT_MINT_AUTHORITY); }
+    if !spl_mint.owned_by(&SPL_TOKEN_ID) || spl_mint.data_len() != SPL_MINT_LEN { return Err(err::BAD_SPL_MINT); }
+    require_canonical(&[b"pc_vault", pc_mint.address().as_ref()], vb, program_id, vault_acct)?;
     let bb = [vb];
     let seeds = [Seed::from(b"pc_vault" as &[u8]), Seed::from(pc_mint.address().as_ref()), Seed::from(&bb)];
     CreateAccount { from: payer, to: vault_acct, lamports: minimum_balance(Vault::LEN), space: Vault::LEN as u64, owner: program_id }.invoke_signed(&[Signer::from(&seeds)])?;
-    let d = unsafe { vault_acct.borrow_unchecked_mut() };
-    let v = Vault::from_bytes_mut(d)?;
+    let v = init_mut::<Vault>(vault_acct)?;
     v.spl_mint.copy_from_slice(spl_mint.address().as_ref()); v.bump = vb; Ok(())
 }
 
 // ── 30: Wrap ──
+// Accounts: [vault, ta, user_ata (w), vault_ata (w), bal_ct (w), amt_ct (fresh signer, w),
+//            ep, cfg, dep, cpi_auth, caller, nk, owner (s, w), evt, sys, spl_token]
+// Data: [cpi_bump, amount u64 LE]
+//
+// Epoch 2: `amt_ct` is no longer a client-created input. The program creates
+// it from the SPL `amount` it just moved into the vault, so the credited
+// ciphertext always equals the deposit.
 
-fn wrap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    let [vault_acct, ta_acct, user_ata, vault_ata, bal_ct, amt_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, _spl, ..] = accounts
+fn wrap(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+    let [vault_acct, ta_acct, user_ata, vault_ata, bal_ct, amt_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, spl, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.len() < 9 { return Err(ProgramError::InvalidInstructionData); }
     let (cb, amount) = (data[0], u64::from_le_bytes(data[1..9].try_into().unwrap()));
     if amount == 0 { return Err(ProgramError::InvalidArgument); }
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
-    if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ta)?;
+    distinct(&[user_ata, vault_ata])?;
+    distinct(&[bal_ct, amt_ct])?;
+    require_fresh(amt_ct)?;
+    require_token_program(spl)?;
+    let ta = load_live_account(ta_acct, bal_ct, program_id)?;
     if owner.address().as_array() != &ta.owner { return Err(ProgramError::InvalidArgument); }
-    if bal_ct.address().as_array() != ta.balance.id() { return Err(ProgramError::InvalidArgument); }
-    let vd = unsafe { vault_acct.borrow_unchecked() };
-    let vault = Vault::from_bytes(vd)?;
-    let vad = unsafe { vault_ata.borrow_unchecked() };
-    if vad.len() < 64 { return Err(ProgramError::InvalidAccountData); }
-    if &vad[32..64] != vault_acct.address().as_ref() { return Err(ProgramError::InvalidArgument); }
-    if &vad[0..32] != &vault.spl_mint { return Err(ProgramError::InvalidArgument); }
+    let vault = load::<Vault>(vault_acct, program_id)?;
+    require_vault_of(vault_acct, vault, &ta.mint, program_id)?;
+    require_vault_ata(vault_ata, vault_acct, vault)?;
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, cb)?;
     SplTransfer { from: user_ata, to: vault_ata, authority: owner, amount }.invoke()?;
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: cb };
+    ctx.create_plaintext_typed::<Uint64>(&amount, amt_ct)?;
     ctx.mint_to_graph(bal_ct, amt_ct, bal_ct)?; Ok(())
 }
 
 // ── 31: UnwrapBurn ──
 // Burns pcTokens and creates a temporary WithdrawalReceipt.
-// The burned_ct (pre-created via gRPC) receives the actual burned amount
-// (= amount if sufficient, 0 if not). Receipt tracks the requested amount.
+// Accounts: [vault, ta, receipt (w), bal_ct (w), amt_ct (w), burned_ct (fresh signer, w),
+//            ep, cfg, dep, cpi_auth, caller, nk, owner (s, w), evt, sys]
+// Data: [receipt_bump, cpi_bump, amount u64 LE]
+//
+// Epoch 2: `burned_ct` must be a fresh keypair; the program creates it (value
+// 0) before the graph writes the burned amount into it, so no existing
+// ciphertext can be named as the burn output. The receipt records the burned
+// ciphertext, the vault and the pc mint.
 
 fn unwrap_burn(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [vault_acct, ta_acct, receipt_acct, bal_ct, amt_ct, burned_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
@@ -3141,77 +3341,96 @@ fn unwrap_burn(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     let (rb, cb) = (data[0], data[1]);
     let amount = u64::from_le_bytes(data[2..10].try_into().unwrap());
     if amount == 0 { return Err(ProgramError::InvalidArgument); }
-    let _vd = unsafe { vault_acct.borrow_unchecked() };
-    Vault::from_bytes(_vd)?;
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
-    if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
-    assert_not_frozen(ta)?;
+    distinct(&[bal_ct, amt_ct, burned_ct])?;
+    require_fresh(burned_ct)?;
+    let ta = load_live_account(ta_acct, bal_ct, program_id)?;
     if owner.address().as_array() != &ta.owner { return Err(ProgramError::InvalidArgument); }
-    if bal_ct.address().as_array() != ta.balance.id() { return Err(ProgramError::InvalidArgument); }
+    let vault = load::<Vault>(vault_acct, program_id)?;
+    require_vault_of(vault_acct, vault, &ta.mint, program_id)?;
+    require_canonical(&[b"pc_receipt", burned_ct.address().as_ref()], rb, program_id, receipt_acct)?;
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, cb)?;
 
-    // Create receipt PDA
     let bb = [rb];
     let seeds = [Seed::from(b"pc_receipt" as &[u8]), Seed::from(burned_ct.address().as_ref()), Seed::from(&bb)];
     CreateAccount { from: owner, to: receipt_acct, lamports: minimum_balance(WithdrawalReceipt::LEN),
         space: WithdrawalReceipt::LEN as u64, owner: program_id }.invoke_signed(&[Signer::from(&seeds)])?;
 
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: cb };
-    // burned_ct is pre-created via gRPC (value=0). Graph writes actual burned amount.
+    ctx.create_plaintext_typed::<Uint64>(&0u64, burned_ct)?;
     ctx.unwrap_burn_graph(bal_ct, amt_ct, bal_ct, burned_ct)?;
 
-    let rd = unsafe { receipt_acct.borrow_unchecked_mut() };
-    let r = WithdrawalReceipt::from_bytes_mut(rd)?;
+    let pc_mint = ta.mint;
+    let r = init_mut::<WithdrawalReceipt>(receipt_acct)?;
     r.owner.copy_from_slice(owner.address().as_ref());
     r.amount = amount.to_le_bytes();
-    r.pending_digest = [0u8; 32]; r.bump = rb; Ok(())
+    r.pending_digest = [0u8; 32];
+    r.bump = rb;
+    r.burned_ct.copy_from_slice(burned_ct.address().as_ref());
+    r.vault.copy_from_slice(vault_acct.address().as_ref());
+    r.pc_mint = pc_mint;
+    r.request = [0u8; 32];
+    r.decrypt_requested = 0;
+    r.version = 1;
+    Ok(())
 }
 
 // ── 32: UnwrapDecrypt ──
+// Accounts: [receipt (w), req (fresh signer, w), burned_ct, ep, cfg, dep, cpi_auth, caller, nk, owner (s, w), evt, sys]
+// Data: [cpi_bump]
+// Epoch 2: `burned_ct` must be the receipt's; decryption is requested once.
 
-fn unwrap_decrypt(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn unwrap_decrypt(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [receipt_acct, req_acct, burned_ct, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
-    let rd = unsafe { receipt_acct.borrow_unchecked() };
-    let r = WithdrawalReceipt::from_bytes(rd)?;
+    require_fresh(req_acct)?;
+    let r = load_mut::<WithdrawalReceipt>(receipt_acct, program_id)?;
     if owner.address().as_array() != &r.owner { return Err(ProgramError::InvalidArgument); }
-    let ctx = EncryptContext { encrypt_program: ep, config: cfg, deposit: dep, cpi_authority: cpi_auth, caller_program: caller, network_encryption_key: nk, payer: owner, event_authority: evt, system_program: sys, cpi_authority_bump: data[0] };
+    if burned_ct.address().as_array() != &r.burned_ct { return Err(err::RECEIPT_MISMATCH); }
+    if r.decrypt_requested != 0 { return Err(err::DECRYPT_ALREADY_REQUESTED); }
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, data[0])?;
     let digest = ctx.request_decryption(req_acct, burned_ct)?;
-    let rd2 = unsafe { receipt_acct.borrow_unchecked_mut() };
-    WithdrawalReceipt::from_bytes_mut(rd2)?.pending_digest = digest; Ok(())
+    r.pending_digest = digest;
+    r.request.copy_from_slice(req_acct.address().as_ref());
+    r.decrypt_requested = 1;
+    Ok(())
 }
 
 // ── 33: UnwrapComplete ──
+// Accounts: [receipt (w), vault, pc_mint, req, vault_ata (w), user_ata (w), owner (s), destination (w), spl_token]
+// Epoch 2: every account is checked against the receipt before it is closed.
 
-fn unwrap_complete(accounts: &[AccountView]) -> ProgramResult {
-    let [receipt_acct, vault_acct, pc_mint, req_acct, vault_ata, user_ata, owner, destination, _spl, ..] = accounts
+fn unwrap_complete(program_id: &Address, accounts: &[AccountView]) -> ProgramResult {
+    let [receipt_acct, vault_acct, pc_mint, req_acct, vault_ata, user_ata, owner, destination, spl, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
-    let rd = unsafe { receipt_acct.borrow_unchecked() };
-    let r = WithdrawalReceipt::from_bytes(rd)?;
+    distinct(&[receipt_acct, destination])?;
+    distinct(&[vault_ata, user_ata])?;
+    require_token_program(spl)?;
+    let r = load_mut::<WithdrawalReceipt>(receipt_acct, program_id)?;
     if owner.address().as_array() != &r.owner { return Err(ProgramError::InvalidArgument); }
+    if r.decrypt_requested == 0 { return Err(err::DECRYPT_NOT_REQUESTED); }
+    if vault_acct.address().as_array() != &r.vault { return Err(err::RECEIPT_MISMATCH); }
+    if pc_mint.address().as_array() != &r.pc_mint { return Err(err::RECEIPT_MISMATCH); }
+    if req_acct.address().as_array() != &r.request { return Err(err::RECEIPT_MISMATCH); }
+    if !req_acct.owned_by(&ENCRYPT_ID) { return Err(err::BAD_REQUEST); }
+    let vault = load::<Vault>(vault_acct, program_id)?;
+    require_vault_of(vault_acct, vault, &r.pc_mint, program_id)?;
+    require_vault_ata(vault_ata, vault_acct, vault)?;
+
     let requested = r.requested_amount();
-    let digest = r.pending_digest;
-
     let req_data = unsafe { req_acct.borrow_unchecked() };
-    let burned: &u64 = accounts::read_decrypted_verified::<Uint64>(req_data, &digest)?;
+    if accounts::decryption_ciphertext(req_data)? != &r.burned_ct { return Err(err::RECEIPT_MISMATCH); }
+    let burned: u64 = *accounts::read_decrypted_verified::<Uint64>(req_data, &r.pending_digest)?;
 
-    // Close receipt
+    // Close receipt (all checks passed).
     let rl = receipt_acct.lamports(); receipt_acct.set_lamports(0);
     destination.set_lamports(destination.lamports() + rl);
     let rd2 = unsafe { receipt_acct.borrow_unchecked_mut() };
     for b in rd2.iter_mut() { *b = 0; }
 
-    if *burned != requested { return Ok(()); } // insufficient balance — no-op, receipt closed
+    if burned != requested { return Ok(()); } // insufficient balance — no-op, receipt closed
 
-    // SPL transfer: vault → user
-    let vd = unsafe { vault_acct.borrow_unchecked() };
-    let vault = Vault::from_bytes(vd)?;
-    let vad = unsafe { vault_ata.borrow_unchecked() };
-    if vad.len() < 64 { return Err(ProgramError::InvalidAccountData); }
-    if &vad[32..64] != vault_acct.address().as_ref() { return Err(ProgramError::InvalidArgument); }
     let vbb = [vault.bump];
     let vs = [Seed::from(b"pc_vault" as &[u8]), Seed::from(pc_mint.address().as_ref()), Seed::from(&vbb)];
     SplTransfer { from: vault_ata, to: user_ata, authority: vault_acct, amount: requested }.invoke_signed(&[Signer::from(&vs)])?;
@@ -3225,29 +3444,22 @@ fn unwrap_complete(accounts: &[AccountView]) -> ProgramResult {
 // balance_ct stays under PC-Token's program authority so wraps/transfers/unwraps continue
 // to work; the copy is rent-exempt and persists, but is only readable by the owner.
 //
+// Accounts: [ta, balance_ct, view_ct (fresh signer, w), new_authorized, ep, cfg, dep, cpi_auth, caller, nk, owner (s, w), evt, sys]
 // Cost: ~0.0023 SOL rent per view (the new ciphertext metadata account).
-//
-// Worth shipping upstream if Encrypt's roadmap doesn't already include a wallet-side view path.
-fn view_balance(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn view_balance(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [ta_acct, balance_ct, view_ct, new_authorized, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, ..] = accounts
     else { return Err(ProgramError::NotEnoughAccountKeys); };
     if !owner.is_signer() { return Err(ProgramError::MissingRequiredSignature); }
     if data.is_empty() { return Err(ProgramError::InvalidInstructionData); }
     let cb = data[0];
+    require_fresh(view_ct)?;
 
-    let td = unsafe { ta_acct.borrow_unchecked() };
-    let ta = TokenAccount::from_bytes(td)?;
+    let ta = load::<TokenAccount>(ta_acct, program_id)?;
     if !ta.is_initialized() { return Err(ProgramError::UninitializedAccount); }
     if owner.address().as_array() != &ta.owner { return Err(ProgramError::InvalidArgument); }
     if balance_ct.address().as_array() != ta.balance.id() { return Err(ProgramError::InvalidArgument); }
 
-    let ctx = EncryptContext {
-        encrypt_program: ep, config: cfg, deposit: dep,
-        cpi_authority: cpi_auth, caller_program: caller,
-        network_encryption_key: nk, payer: owner,
-        event_authority: evt, system_program: sys,
-        cpi_authority_bump: cb,
-    };
+    let ctx = encrypt_ctx(program_id, ep, cfg, dep, cpi_auth, caller, nk, owner, evt, sys, cb)?;
     // Privacy invariant: `new_authorized` must be a key only the user controls. Client supplies
     // an ephemeral ed25519 pubkey — that pubkey becomes the sole reader, and only the matching
     // private key (held in the user's session) can sign a `readCiphertext` request.
@@ -3263,7 +3475,7 @@ mod tests {
     use encrypt_types::graph::{get_node, parse_graph, GraphNodeKind};
     use encrypt_types::identifier::*;
     use encrypt_types::types::FheType;
-    use super::{burn_graph, mint_to_graph, transfer_from_graph, transfer_graph, unwrap_burn_graph};
+    use super::{mint_to_graph, transfer_from_graph, transfer_graph, transfer_receipt_graph, unwrap_burn_graph};
 
     fn run_mock(graph_fn: fn() -> Vec<u8>, inputs: &[u128], fhe_types: &[FheType]) -> Vec<u128> {
         let data = graph_fn(); let pg = parse_graph(&data).unwrap();
@@ -3293,18 +3505,18 @@ mod tests {
     #[test] fn mint_to() { let r = run_mock(mint_to_graph, &[500, 300], &[T, T]); assert_eq!(r[0], 800); }
     #[test] fn transfer_ok() { let r = run_mock(transfer_graph, &[1000, 500, 300], &[T, T, T]); assert_eq!(r[0], 700); assert_eq!(r[1], 800); }
     #[test] fn transfer_insufficient() { let r = run_mock(transfer_graph, &[100, 500, 300], &[T, T, T]); assert_eq!(r[0], 100); assert_eq!(r[1], 500); }
-    #[test] fn burn_ok() { let r = run_mock(burn_graph, &[1000, 300], &[T, T]); assert_eq!(r[0], 700); }
-    #[test] fn burn_insufficient() { let r = run_mock(burn_graph, &[100, 300], &[T, T]); assert_eq!(r[0], 100); }
     #[test] fn transfer_from_ok() { let r = run_mock(transfer_from_graph, &[1000, 500, 400, 300], &[T, T, T, T]); assert_eq!(r[0], 700); assert_eq!(r[1], 800); assert_eq!(r[2], 100); }
     #[test] fn transfer_from_insufficient() { let r = run_mock(transfer_from_graph, &[100, 500, 400, 300], &[T, T, T, T]); assert_eq!(r[0], 100); assert_eq!(r[1], 500); assert_eq!(r[2], 400); }
+    #[test] fn transfer_receipt_ok() { let r = run_mock(transfer_receipt_graph, &[1000, 500, 300], &[T, T, T]); assert_eq!(r, vec![700, 800, 300]); }
+    #[test] fn transfer_receipt_insufficient() { let r = run_mock(transfer_receipt_graph, &[100, 500, 300], &[T, T, T]); assert_eq!(r, vec![100, 500, 0]); }
 
     #[test] fn unwrap_burn_sufficient() { let r = run_mock(unwrap_burn_graph, &[1000, 300], &[T, T]); assert_eq!(r[0], 700); assert_eq!(r[1], 300); }
     #[test] fn unwrap_burn_insufficient() { let r = run_mock(unwrap_burn_graph, &[100, 300], &[T, T]); assert_eq!(r[0], 100); assert_eq!(r[1], 0); }
 
     #[test] fn graph_shapes() {
-        let g = swap_shapes(mint_to_graph, 2, 1); let g = swap_shapes(transfer_graph, 3, 2);
-        let g = swap_shapes(burn_graph, 2, 1); let g = swap_shapes(transfer_from_graph, 4, 3);
-        let g = swap_shapes(unwrap_burn_graph, 2, 2);
+        swap_shapes(mint_to_graph, 2, 1); swap_shapes(transfer_graph, 3, 2);
+        swap_shapes(transfer_from_graph, 4, 3); swap_shapes(unwrap_burn_graph, 2, 2);
+        swap_shapes(transfer_receipt_graph, 3, 3);
     }
     fn swap_shapes(f: fn() -> Vec<u8>, ni: u8, no: u8) { let g = f(); let pg = parse_graph(&g).unwrap();
         assert_eq!(pg.header().num_inputs(), ni); assert_eq!(pg.header().num_outputs(), no); }
@@ -3315,6 +3527,7 @@ mod tests {
 
 ```rust
 // Copyright (c) dWallet Labs, Ltd.
+// Copyright (c) 2026 Inkwell Finance (epoch-2 hardening)
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 
 #![allow(unexpected_cfgs)]
@@ -3338,6 +3551,16 @@ mod tests {
 /// 2. AddLiquidity        — 2× TransferWithReceipt + add_liquidity_graph + 2× close
 /// 4. RemoveLiquidity     — remove_liquidity_graph + 2× pc-token::transfer (vault → user)
 /// 5. CreateLpPosition    — internal LP balance account
+///
+/// ## Epoch-2 hardening (Inkwell fork)
+///
+/// The pc-token program, the Encrypt program and pc-token's CPI authority
+/// are pinned, `caller_program` must be this program, and Pool / LpPosition
+/// accounts are loaded only when owned by this program with their exact
+/// length (the pool is also re-derived from its seeds). Before this, a forged
+/// pool plus a fake "pc-token" program could obtain the real pool PDA's
+/// signature, and a forged LP position could withdraw liquidity it never
+/// deposited.
 use encrypt_dsl::prelude::encrypt_fn;
 use encrypt_pinocchio::EncryptContext;
 #[allow(unused_imports)]
@@ -3354,10 +3577,60 @@ use pinocchio_system::instructions::CreateAccount;
 
 entrypoint!(process_instruction);
 
-pub const ID: Address = Address::new_from_array([6u8; 32]);
+/// pc-swap, devnet epoch 2: `BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD`.
+pub const ID: Address = Address::new_from_array([
+    160, 244, 96, 148, 207, 139, 115, 102, 122, 56, 182, 136, 187, 132, 156, 0, 227, 239, 54, 42,
+    87, 98, 205, 124, 27, 245, 65, 186, 158, 84, 12, 162,
+]);
 
-/// PC-Token program id (mirrors pc-token::ID).
-pub const PC_TOKEN_ID: Address = Address::new_from_array([5u8; 32]);
+/// PC-Token program id (mirrors pc-token::ID), devnet epoch 2:
+/// `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ`. Every `pc_token_program`
+/// account must be this program.
+pub const PC_TOKEN_ID: Address = Address::new_from_array([
+    40, 235, 44, 158, 173, 253, 55, 205, 13, 122, 126, 12, 23, 135, 0, 47, 205, 91, 160, 69, 32,
+    176, 41, 50, 186, 139, 166, 110, 92, 232, 79, 4,
+]);
+
+/// Encrypt program on devnet: `4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8`.
+#[cfg(not(feature = "localnet"))]
+pub const ENCRYPT_ID: Address = Address::new_from_array([
+    54, 52, 193, 56, 216, 205, 66, 173, 150, 219, 76, 71, 2, 69, 247, 186, 158, 244, 102, 172,
+    211, 224, 217, 69, 221, 212, 114, 161, 199, 34, 86, 139,
+]);
+
+/// Encrypt program as deployed by the `encrypt-solana-test` LiteSVM harness.
+#[cfg(feature = "localnet")]
+pub const ENCRYPT_ID: Address = Address::new_from_array([
+    175, 190, 213, 40, 242, 81, 150, 134, 222, 39, 3, 15, 110, 91, 65, 64, 171, 126, 206, 36,
+    245, 170, 97, 22, 255, 187, 65, 204, 51, 109, 125, 133,
+]);
+
+/// System program.
+pub const SYSTEM_ID: Address = Address::new_from_array([0u8; 32]);
+
+/// Encrypt CPI authority seed (same for every caller program).
+const CPI_AUTHORITY_SEED: &[u8] = b"__encrypt_cpi_authority";
+
+/// Custom error codes added by the epoch-2 hardening. Values are stable ABI.
+pub mod err {
+    use pinocchio::error::ProgramError;
+    /// The Encrypt program account is not the pinned Encrypt program.
+    pub const FOREIGN_ENCRYPT: ProgramError = ProgramError::Custom(0x200);
+    /// `caller_program` is not this program.
+    pub const WRONG_CALLER: ProgramError = ProgramError::Custom(0x201);
+    /// `pc_token_program` is not the pinned pc-token program.
+    pub const FOREIGN_PC_TOKEN: ProgramError = ProgramError::Custom(0x202);
+    /// `pc_token_cpi_auth` is not pc-token's Encrypt CPI authority.
+    pub const BAD_PC_TOKEN_CPI_AUTH: ProgramError = ProgramError::Custom(0x203);
+    /// The pool account is not the PDA its seeds derive.
+    pub const BAD_POOL: ProgramError = ProgramError::Custom(0x204);
+    /// A user-supplied bump is not the canonical bump of its PDA.
+    pub const NON_CANONICAL_BUMP: ProgramError = ProgramError::Custom(0x205);
+    /// Two slots that must differ name the same account.
+    pub const ALIASED: ProgramError = ProgramError::Custom(0x206);
+    /// `direction` is neither 0 nor 1.
+    pub const BAD_DIRECTION: ProgramError = ProgramError::Custom(0x207);
+}
 
 /// PC-Token instruction discriminators we invoke via CPI.
 const PC_TOKEN_IX_INIT_ACCT: u8 = 1;
@@ -3424,6 +3697,107 @@ impl LpPosition {
 
 fn minimum_balance(s: usize) -> u64 {
     (s as u64 + 128) * 6960
+}
+
+const _: () = {
+    assert!(Pool::LEN == 226);
+    assert!(LpPosition::LEN == 97);
+    assert!(core::mem::align_of::<Pool>() == 1);
+    assert!(core::mem::align_of::<LpPosition>() == 1);
+};
+
+// ── Validation helpers (epoch 2) ──
+
+/// Load the pool: owned by this program, exact length, initialized, and its
+/// address re-derived from `["pc_pool", mint_a, mint_b, bump]`.
+pub fn load_pool<'a>(pool_acct: &'a AccountView, program_id: &Address) -> Result<&'a Pool, ProgramError> {
+    if !pool_acct.owned_by(program_id) {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    let d = unsafe { pool_acct.borrow_unchecked() };
+    if d.len() != Pool::LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let pool = Pool::from_bytes(d)?;
+    if pool.is_initialized != 1 {
+        return Err(ProgramError::UninitializedAccount);
+    }
+    let derived = Address::create_program_address(
+        &[b"pc_pool", &pool.mint_a, &pool.mint_b, &[pool.bump]],
+        program_id,
+    )
+    .map_err(|_| err::BAD_POOL)?;
+    if &derived != pool_acct.address() {
+        return Err(err::BAD_POOL);
+    }
+    Ok(pool)
+}
+
+/// Load an LP position: owned by this program, exact length, bound to `pool`
+/// and `owner`.
+pub fn load_lp<'a>(
+    lp_acct: &'a AccountView,
+    program_id: &Address,
+    pool_acct: &AccountView,
+    owner: &AccountView,
+) -> Result<&'a LpPosition, ProgramError> {
+    if !lp_acct.owned_by(program_id) {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    let d = unsafe { lp_acct.borrow_unchecked() };
+    if d.len() != LpPosition::LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let lp = LpPosition::from_bytes(d)?;
+    if &lp.pool != pool_acct.address().as_array() {
+        return Err(ProgramError::InvalidArgument);
+    }
+    if &lp.owner != owner.address().as_array() {
+        return Err(ProgramError::InvalidArgument);
+    }
+    Ok(lp)
+}
+
+/// Pin the Encrypt program, this program as caller, the pc-token program and
+/// pc-token's CPI authority, and the system program.
+pub fn check_programs(
+    program_id: &Address,
+    ep: &AccountView,
+    caller_program: &AccountView,
+    pc_token_cpi_auth: &AccountView,
+    pc_token_program: &AccountView,
+    token_cpi_bump: u8,
+    sys: &AccountView,
+) -> ProgramResult {
+    if ep.address() != &ENCRYPT_ID {
+        return Err(err::FOREIGN_ENCRYPT);
+    }
+    if caller_program.address() != program_id {
+        return Err(err::WRONG_CALLER);
+    }
+    if pc_token_program.address() != &PC_TOKEN_ID {
+        return Err(err::FOREIGN_PC_TOKEN);
+    }
+    let auth = Address::create_program_address(&[CPI_AUTHORITY_SEED, &[token_cpi_bump]], &PC_TOKEN_ID)
+        .map_err(|_| err::BAD_PC_TOKEN_CPI_AUTH)?;
+    if &auth != pc_token_cpi_auth.address() {
+        return Err(err::BAD_PC_TOKEN_CPI_AUTH);
+    }
+    if sys.address() != &SYSTEM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    Ok(())
+}
+
+fn distinct(accts: &[&AccountView]) -> ProgramResult {
+    for (i, a) in accts.iter().enumerate() {
+        for b in &accts[i + 1..] {
+            if a.address() == b.address() {
+                return Err(err::ALIASED);
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── FHE Graphs ──
@@ -3547,9 +3921,9 @@ fn process_instruction(
 ) -> ProgramResult {
     match data.split_first() {
         Some((&0, rest)) => create_pool(program_id, accounts, rest),
-        Some((&1, rest)) => swap(accounts, rest),
-        Some((&2, rest)) => add_liquidity(accounts, rest),
-        Some((&4, rest)) => remove_liquidity(accounts, rest),
+        Some((&1, rest)) => swap(program_id, accounts, rest),
+        Some((&2, rest)) => add_liquidity(program_id, accounts, rest),
+        Some((&4, rest)) => remove_liquidity(program_id, accounts, rest),
         Some((&5, rest)) => create_lp_position(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -3886,6 +4260,19 @@ fn create_pool(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     let token_cpi_bump = data[4];
     let _reserved = data[5];
 
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    distinct(&[mint_a, mint_b])?;
+    let (expected_pool, canonical) = Address::find_program_address(
+        &[b"pc_pool", mint_a.address().as_ref(), mint_b.address().as_ref()],
+        program_id,
+    );
+    if canonical != pool_bump {
+        return Err(err::NON_CANONICAL_BUMP);
+    }
+    if &expected_pool != pool_acct.address() {
+        return Err(err::BAD_POOL);
+    }
+
     // 1) Create pool PDA
     let bb = [pool_bump];
     let pool_seeds = [
@@ -4118,10 +4505,25 @@ fn create_lp_position(
     }
     let (lp_bump, cpi_bump) = (data[0], data[1]);
 
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
+    if ep.address() != &ENCRYPT_ID {
+        return Err(err::FOREIGN_ENCRYPT);
+    }
+    if caller_program.address() != program_id {
+        return Err(err::WRONG_CALLER);
+    }
+    if sys.address() != &SYSTEM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    load_pool(pool_acct, program_id)?;
+    let (expected_lp, canonical) = Address::find_program_address(
+        &[b"pc_lp", pool_acct.address().as_ref(), owner.address().as_ref()],
+        program_id,
+    );
+    if canonical != lp_bump {
+        return Err(err::NON_CANONICAL_BUMP);
+    }
+    if &expected_lp != lp_acct.address() {
+        return Err(ProgramError::InvalidSeeds);
     }
 
     let bb = [lp_bump];
@@ -4188,7 +4590,7 @@ fn create_lp_position(
 //
 // Data: [1, swap_cpi_bump, token_cpi_bump, direction]
 //   direction: 0 = A→B, 1 = B→A
-fn swap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn swap(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [
         pool_acct,
         user_in_acct,
@@ -4231,12 +4633,17 @@ fn swap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let swap_cpi_bump = data[0];
     let token_cpi_bump = data[1];
     let direction = data[2];
-
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
+    if direction > 1 {
+        return Err(err::BAD_DIRECTION);
     }
+
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    let pool = load_pool(pool_acct, program_id)?;
+    distinct(&[user_in_acct, user_out_acct, vault_in_acct, vault_out_acct, pool_acct])?;
+    distinct(&[
+        user_in_bal_ct, user_out_bal_ct, vault_in_bal_ct, vault_out_bal_ct,
+        reserve_in_ct, reserve_out_ct, amt_in_ct, min_out_ct, amt_out_ct, receipt_ct,
+    ])?;
 
     let (expected_vault_in, expected_vault_out, exp_reserve_in, exp_reserve_out) = if direction == 0
     {
@@ -4376,7 +4783,7 @@ fn swap(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
 //   nk, payer (signer = user, also LP owner), evt, sys
 //
 // Data: [2, swap_cpi_bump, token_cpi_bump]
-fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn add_liquidity(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [
         pool_acct,
         lp_pos_acct,
@@ -4422,11 +4829,9 @@ fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let swap_cpi_bump = data[0];
     let token_cpi_bump = data[1];
 
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
-    }
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    let pool = load_pool(pool_acct, program_id)?;
+    distinct(&[user_a_acct, user_b_acct, vault_a_acct, vault_b_acct, pool_acct, lp_pos_acct])?;
     if vault_a_acct.address().as_ref() != &pool.vault_a {
         return Err(ProgramError::InvalidArgument);
     }
@@ -4443,14 +4848,7 @@ fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         return Err(ProgramError::InvalidArgument);
     }
 
-    let lpd = unsafe { lp_pos_acct.borrow_unchecked() };
-    let lp_pos = LpPosition::from_bytes(lpd)?;
-    if &lp_pos.pool != pool_acct.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
-    if &lp_pos.owner != payer.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
+    let lp_pos = load_lp(lp_pos_acct, program_id, pool_acct, payer)?;
     if user_lp_ct.address().as_ref() != &lp_pos.balance {
         return Err(ProgramError::InvalidArgument);
     }
@@ -4539,7 +4937,7 @@ fn add_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
 //
 // Accounts: similar to AddLiquidity but vault → user, plus out_a_ct, out_b_ct.
 // Data: [4, swap_cpi_bump, token_cpi_bump]
-fn remove_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
+fn remove_liquidity(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [
         pool_acct,
         lp_pos_acct,
@@ -4584,11 +4982,9 @@ fn remove_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let swap_cpi_bump = data[0];
     let token_cpi_bump = data[1];
 
-    let pd = unsafe { pool_acct.borrow_unchecked() };
-    let pool = Pool::from_bytes(pd)?;
-    if pool.is_initialized != 1 {
-        return Err(ProgramError::UninitializedAccount);
-    }
+    check_programs(program_id, ep, caller_program, pc_token_cpi_auth, pc_token_program, token_cpi_bump, sys)?;
+    let pool = load_pool(pool_acct, program_id)?;
+    distinct(&[user_a_acct, user_b_acct, vault_a_acct, vault_b_acct, pool_acct, lp_pos_acct])?;
     if vault_a_acct.address().as_ref() != &pool.vault_a {
         return Err(ProgramError::InvalidArgument);
     }
@@ -4605,14 +5001,7 @@ fn remove_liquidity(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         return Err(ProgramError::InvalidArgument);
     }
 
-    let lpd = unsafe { lp_pos_acct.borrow_unchecked() };
-    let lp_pos = LpPosition::from_bytes(lpd)?;
-    if &lp_pos.pool != pool_acct.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
-    if &lp_pos.owner != payer.address().as_array() {
-        return Err(ProgramError::InvalidArgument);
-    }
+    let lp_pos = load_lp(lp_pos_acct, program_id, pool_acct, payer)?;
     if user_lp_ct.address().as_ref() != &lp_pos.balance {
         return Err(ProgramError::InvalidArgument);
     }
@@ -4964,7 +5353,7 @@ const ANNOTATIONS: Record<Context, { headline: string; points: string[] }> = {
     headline: 'The ramp is the only public step.',
     points: [
       'KYC lives with the issuer, at mint and redeem.',
-      'After settlement, even the issuer can’t read your balance.',
+      'The goal: after settlement, only your viewing key can read your balance (not yet true in pre-alpha).',
     ],
   },
   confirm: {
@@ -5547,8 +5936,8 @@ export const WalletFrame = forwardRef<WalletFrameHandle, WalletFrameProps>(funct
                       ),
                     )}
                     <p className="px-4 pb-3 pt-1 text-[10px] leading-relaxed text-wd-sub">
-                      Encrypted on-chain. Even the issuer can't read them. Reveal decrypts locally
-                      with your viewing key; nothing leaves this device.
+                      Once Encrypt's encryption is live, these balances are encrypted on-chain and
+                      only your viewing key can read them. Pre-alpha: values are still plaintext.
                     </p>
                   </>,
                   <div className="flex items-center gap-1.5 px-4 pb-1 pt-3 text-[10px] font-medium uppercase tracking-widest text-wd-sub">
@@ -5824,9 +6213,9 @@ export const WalletFrame = forwardRef<WalletFrameHandle, WalletFrameProps>(funct
               <InfoRow label="Wrap fee (5 bps)" value="$0.13" dim />
             </div>
             <p className="my-3 text-[10px] leading-relaxed text-wd-sub">
-              This step is public on-chain. It's the ramp. After it settles, your pcUSD is
-              encrypted: visible to you, to the issuer's auditor key under regulation, and to no
-              one else.
+              This step is public on-chain. It's the ramp. Once encryption is live, your pcUSD
+              balance after this step is encrypted and readable only with your viewing key.
+              Pre-alpha: it is still plaintext.
             </p>
             <div data-tour="wrap-cta" data-tour-click="wrap-cta">
               <PrimaryButton onClick={confirmWrap} disabled={balances.USDC < WRAP_AMOUNT}>
@@ -6301,7 +6690,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'reveal',
     target: 'reveal-eye',
     title: 'Reveal with your viewing key',
-    copy: 'Decryption happens on this device, from your seed. Nothing is sent anywhere.',
+    copy: 'The goal: only your viewing key can read this balance. In pre-alpha the value is still plaintext and comes back from the Encrypt executor.',
     advance: 'click',
     clickTarget: 'reveal-eye',
     clickPrompt: 'Click the eye on pcUSD',

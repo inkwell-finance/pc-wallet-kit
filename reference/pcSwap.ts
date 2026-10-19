@@ -197,7 +197,9 @@ function buildWrapIx(
       { pubkey: userAta, isSigner: false, isWritable: true },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: balanceCt, isSigner: false, isWritable: true },
-      { pubkey: amountCt, isSigner: false, isWritable: true },
+      // Epoch 2: a fresh keypair. The program creates this ciphertext from `amount`
+      // itself, so the credit always equals the SPL deposited.
+      { pubkey: amountCt, isSigner: true, isWritable: true },
       ...encryptCpiAccountsList(encAccts, pcTokenProgram, cpiAuthority, owner),
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
@@ -429,9 +431,10 @@ export class PcSwapClient {
         if (initializingBalCt || depositIx) await new Promise((r) => setTimeout(r, 5000));
       }
 
-      // Encrypt the wrap amount, authorized to pc-token (caller of the wrap ix).
-      const amountCt = await this.encryptInputCt(amount, this.opts.pcTokenProgramId);
-      await this.pollVerifiedInputs([amountCt]);
+      // Epoch 2: no createInput for wrap. The amount ciphertext is a fresh keypair that
+      // pc-token initializes from the SPL amount, so there is nothing to poll.
+      const amountCtKp = Keypair.generate();
+      const amountCt = amountCtKp.publicKey;
 
       // Snapshot the bal CT digest *before* submitting the wrap — we'll wait for it to
       // change as the signal that the executor committed the new balance. For repeat
@@ -447,6 +450,7 @@ export class PcSwapClient {
         );
         wrapTx.feePayer = wallet;
         wrapTx.recentBlockhash = (await this.opts.connection.getLatestBlockhash('confirmed')).blockhash;
+        wrapTx.partialSign(amountCtKp);
         return this.opts.signAndSend(wrapTx);
       };
 

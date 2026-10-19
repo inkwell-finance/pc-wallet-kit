@@ -2,7 +2,7 @@
 
 **Audience:** wallet engineering teams integrating confidential balances and a confidential swap on devnet.
 **Status:** pre-alpha technical preview. Devnet only. Read §1 before anything else.
-**Date:** 2026-08-24
+**Date:** 2026-10-19 (devnet epoch 2)
 **Contact:** integrations — reply on the thread you received this from.
 
 This guide covers, in the order a wallet would ship them:
@@ -14,6 +14,18 @@ This guide covers, in the order a wallet would ship them:
 5. Unwrap back to SPL
 
 Everything here is written against the programs that are actually deployed on devnet today, from the reference client we run in our own web demo. Where a flow has no finished reference client yet, it says so.
+
+### What changed in epoch 2
+
+Epoch 1 ran the upstream pc-token / pc-swap examples. Those had program-level holes: wrap credited a client-supplied ciphertext, accounts weren't checked for owner or type, the unwrap steps weren't bound together, the Encrypt program and the pc-token program weren't pinned, and pc-swap's pool wasn't owner-checked. Epoch 2 redeploys patched programs at new addresses, built from `encrypt-pre-alpha` branch `inkwell/epoch-2-hardening` (commit `3a49223`). Each hole has a regression test there that fails on the old build.
+
+For a wallet, only these change:
+
+- **Wrap (§4):** the amount ciphertext is a fresh keypair you `partialSign`. There is no `createInput` and no verification poll; the program creates the ciphertext from the SPL amount.
+- **Unwrap (§9):** `burnedCt` is a fresh keypair you `partialSign`, created by the program. The receipt is now 203 bytes, so unwrap rent rises slightly. Decryption can be requested once per receipt.
+- **Errors:** wrong-owner or wrong-length accounts, a foreign Encrypt program, a wrong caller, aliased accounts and non-canonical bumps are rejected. Custom errors are `0x100`–`0x10E` from pc-token and `0x200`–`0x207` from pc-swap (names in the vendored sources).
+
+Every other instruction keeps its discriminator, data and account order. Every address in §2 is new.
 
 ---
 
@@ -57,29 +69,12 @@ Network encryption key (32 bytes, all `0x55`): `Uint8Array(32).fill(0x55)`
 | Program | Address |
 |---|---|
 | Encrypt | `4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8` |
-| pc-token | `3QaXJefrZ5K2nPWUfQwhbqUVMc1azSZT4MzU2hTfQV8C` |
-| pc-swap | `C3FYxXn15CMfimyrPU5FdwjyuMwvjVuB9zUPShL9eEMv` |
+| pc-token | `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ` |
+| pc-swap | `BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD` |
 
-Two mock tokens are deployed, both 6 decimals. They are named USDC and DOGE for demo purposes only — they are test mints we control, worth nothing.
+Two mock tokens, both 6 decimals, named USDC and DOGE for demo purposes only. They are test mints we control, worth nothing. Their SPL mints, pc-mints, vaults, the mock-USDC / mock-DOGE pool and its reserve ciphertexts are created when epoch 2 is initialized on devnet. **[pending deploy]** Read every one of them from [`devnet.json`](devnet.json) rather than from this guide. Its `epoch` bumps on every redeploy, so your build can refuse to run against a stale set.
 
-| | mock-USDC | mock-DOGE |
-|---|---|---|
-| SPL mint | `AHfy9KyJLQMCS6mjcoUvvFgUqKr6HKoywee2mdpBpwa4` | `DHoyYsraopt627rYMgaweGYpm3rQkXXGWL6AW3EZpjon` |
-| pc-mint (PDA) | `6CXh4GJMSd8d3PAYCqsAYyK25prbTH1LAQiusg1BZkAH` | `3pvtAYbteZJWkia5gg8yMSRvFcUfaPjcwoK4LKw274Fn` |
-| pc-mint authority | `G1zjvpQwg9LycZXPCuYN4kxsSNQBMzsXKz9bMz6GkJGD` | `ms9YhtEZPVBdXDwbCswDQc1m7GkrdtiLHF3TzD9SVdH` |
-| vault (PDA) | `5KDQ5YZbDMregqrWpwkqi4dCRU4yqbSCYFngXgdp5Nep` | `GSTAGfDfEhiCuBpzDpTZwbj2XSyZRwbp1Qtq3qudf61S` |
-| vault SPL ATA | `DcBz3thrap7j5QiQA8iaEWZu5p9wfcuz49QU1nFTvs9f` | `2hcPj5doJfYm2UwQPo4hGVUAd5jY6zwrcyxqcSaPg5Uh` |
-
-pc-swap pool (mock-USDC / mock-DOGE, seeded 100 : 100):
-
-| | Address |
-|---|---|
-| pool PDA `[b"pc_pool", pcUSDC, pcDOGE]` | `4f9qJbkX1jkHgzZMVC8eRfQFuPUokf1hZn7rDsYZezWB` |
-| pool vault pc-account USDC / DOGE | `3mX9fEr4uZDF2mUALxM3aSVVmgdFYXPdotXSkZ9PLhsF` / `7BEzSH2GhUVyvxuokrtDG7WdvgDk7hA7CLb73ZCEakRc` |
-| pool vault balance CT USDC / DOGE | `6WXyJ61jV7VW2M5LsrkT4JUzmaJCt3WeSvkTbNbKx96A` / `EdhnbDApUHZ4NMYb6gu8KuoKGyi8Z165mcuJbXuRrojx` |
-| reserve CT USDC / DOGE | `25ir3Q29HsWsFRxyruzraDJb3seGry25GptzZe8aCuho` / `JAZB6uVEJMirzUoZqKvGQE59aoYNUsFjpmgpBtpW1caV` |
-
-All of the above verified live on devnet on 2026-08-24. We will send a `devnet.json` with the same fields, plus an `epoch` number that bumps on every redeploy, so your build can refuse to run against a stale set.
+The epoch 1 addresses (pc-token `3QaXJefr…`, pc-swap `C3FYxXn1…`) still exist on devnet but run the unpatched programs. Don't integrate against them.
 
 ### PDA derivations
 
@@ -165,24 +160,24 @@ The wrap is the public on-ramp: an ordinary SPL transfer from the user's ATA int
 
 Steps:
 
-1. `createInput(amount, fheType=4, authorized = pc-token program)` → `amountCt`. Poll `amountCt` account until `data[99] == 1` (reference: 750 ms interval, 60 s cap). Submitting before verification is the most common cause of "wrapped but balance is 0".
-2. Build and send the wrap transaction: CU limit 400 000 + the instruction below.
+1. Generate a fresh `amountCt` keypair. Don't call `createInput`: the program creates this ciphertext from the SPL `amount` itself, so the credit always equals what was deposited.
+2. Build the wrap transaction: CU limit 400 000 + the instruction below. `partialSign(amountCt)`, then the wallet signs.
 3. Wait for settlement: snapshot the balance CT's `data[2..34]` before sending; the wrap has settled when it changes (§8).
 
 **Wrap** — pc-token discriminator `30`, data = 10 bytes: `[30, cpiBump, amount as u64 LE]`.
 
 ```
-vault PDA               ro
+vault PDA               ro     [b"pc_vault", pcMint] of this pc-account's mint
 pcAccount PDA           ro
 userAta                 w
-vaultAta                w
+vaultAta                w      owned by SPL Token, mint = the vault's SPL mint
 balanceCt               w      (from pcAccount data[64..96])
-amountCt                w      (from createInput)
+amountCt                signer, w   fresh keypair (epoch 2)
 … Encrypt tail (payer = owner, signer)
 TOKEN_PROGRAM_ID        ro
 ```
 
-`amount == 0` is rejected. The reference client waits up to 90 s for the digest change and reports failure if it never moves — note the SPL has already left the user's ATA at that point; the pc-token balance will catch up when the executor commits.
+`amount == 0` is rejected, and so is a vault that doesn't belong to the pc-account's mint. The reference client waits up to 90 s for the digest change and reports failure if it never moves — note the SPL has already left the user's ATA at that point; the pc-token balance will catch up when the executor commits.
 
 Reference: `PcSwapClient.wrap()` (`pcSwap.ts`).
 
@@ -323,6 +318,8 @@ Other things to handle:
 - **Stale balance ciphertext** (all-zero digest): the executor never committed to this account. Wrap will still go through; swap should refuse. Surface it as "your deposit is still settling".
 - **RPC load.** Each settlement wait opens a WebSocket subscription and polls; a swap does two in parallel. The public devnet RPC will 429 you. Use your own provider.
 - **Rent leakage.** Each reveal creates a ciphertext account that isn't reclaimed today (~0.0023 SOL). Swap receipts and unwrap receipts are closed in-flow. This is a pre-alpha wart we've flagged upstream.
+- **Dropped transactions.** The devnet executor occasionally never processes a confirmed transaction (5 of 50 in one of our runs). Its output ciphertexts stay Pending forever, so a settlement wait can time out for good. Show "unknown", never "failed" or "succeeded".
+- **Ciphertexts can be overwritten through Encrypt.** On devnet today, the Encrypt program lets anyone name an existing ciphertext as the output of their own graph. Epoch 2 closes the holes in pc-token / pc-swap, but it can't stop a balance being rewritten through Encrypt directly. It has been reported to dWallet Labs. It's another reason this rail is devnet-only and holds no value.
 - **ACL is coarse.** In pre-alpha Encrypt, "authorized to compute on" equals "authorized to decrypt". Never authorize a balance copy to a key you don't control, and never call `make_public`/`request_decryption` on anything but your own reveal copies.
 
 ---
@@ -331,10 +328,12 @@ Other things to handle:
 
 Three instructions: burn an encrypted amount into a receipt, request decryption of the burned amount, then release SPL from the vault once the decrypted amount is verified on-chain.
 
-1. `createInput(amount, fheType=4, authorized = pc-token)` → `amountCt`; poll verified. Generate ephemeral `burnedCt`.
-2. **UnwrapBurn** — discriminator `31`, data = 11 bytes `[31, receiptBump, cpiBump, amount u64 LE]`. Accounts: `vault(ro)`, `pcAccount(w)`, `receiptPda(w) [b"pc_receipt", burnedCt]`, `balanceCt(w)`, `amountCt(w)`, `burnedCt(w)` + Encrypt tail. The graph computes `burned = balance ≥ amount ? amount : 0`.
-3. **UnwrapDecrypt** — discriminator `32`, data `[32, cpiBump]`. Accounts: `receipt(w)`, `requestAcct(signer, w)` (ephemeral), `burnedCt(ro)` + Encrypt tail with `encryptConfig` **read-only**. Wait for the executor to post the decryption (reference: poll up to 180 s).
-4. **UnwrapComplete** — discriminator `33`, data `[33]`. Accounts: `receipt(w)`, `vault(ro)`, `pcMint(ro)`, `requestAcct(ro)`, `vaultAta(w)`, `userAta(w)`, `owner(signer)`, `destination(w)`, `TOKEN_PROGRAM_ID(ro)`. If the decrypted `burned` ≠ requested amount (i.e. the user didn't have it), the receipt is closed and **no SPL is released — silently**.
+1. `createInput(amount, fheType=4, authorized = pc-token)` → `amountCt`; poll verified. Generate a fresh `burnedCt` keypair (the program creates it; epoch 2).
+2. **UnwrapBurn** — discriminator `31`, data = 11 bytes `[31, receiptBump, cpiBump, amount u64 LE]`. Accounts: `vault(ro)` (the PDA of this pc-account's mint), `pcAccount(w)`, `receiptPda(w) [b"pc_receipt", burnedCt]`, `balanceCt(w)`, `amountCt(w)`, `burnedCt(signer, w)` + Encrypt tail. `partialSign(burnedCt)`. The graph computes `burned = balance ≥ amount ? amount : 0`. The receipt (203 bytes) records `burnedCt`, the vault and the pc-mint.
+3. **UnwrapDecrypt** — discriminator `32`, data `[32, cpiBump]`. Accounts: `receipt(w)`, `requestAcct(signer, w)` (ephemeral), `burnedCt(ro)` + Encrypt tail with `encryptConfig` **read-only**. `burnedCt` must be the one on the receipt, and decryption can be requested only once per receipt, so persist `requestAcct` until step 4. Wait for the executor to post the decryption (reference: poll up to 180 s).
+4. **UnwrapComplete** — discriminator `33`, data `[33]`. Accounts: `receipt(w)`, `vault(ro)`, `pcMint(ro)`, `requestAcct(ro)`, `vaultAta(w)`, `userAta(w)`, `owner(signer)`, `destination(w)`, `TOKEN_PROGRAM_ID(ro)`. Vault, pc-mint and request must match the receipt. If the decrypted `burned` ≠ requested amount (i.e. the user didn't have it), the receipt is closed and **no SPL is released — silently**.
+
+If the executor never answers the decryption request, the burned amount stays stuck; there is no refund path in epoch 2. Don't put unwrap in a live demo.
 
 Reference implementation status: the deployed program supports all three; the upstream e2e suite has builders (`pc-token/e2e/instructions.ts`, `UnwrapBurn/Decrypt/Complete`). Our web demo doesn't expose unwrap yet; a browser-tested three-step client exists only for our legacy cold-storage variant (`pcTokenColdClient.ts`, same shape, different discriminators). The SDK will ship a tested `unwrap()`.
 

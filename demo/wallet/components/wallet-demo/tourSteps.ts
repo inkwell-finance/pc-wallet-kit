@@ -48,7 +48,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'reveal',
     target: 'reveal-eye',
     title: 'Reveal with your viewing key',
-    copy: 'Decryption happens on this device, from your seed. Nothing is sent anywhere.',
+    copy: 'The goal: only your viewing key can read this balance. In pre-alpha the value is still plaintext and comes back from the Encrypt executor.',
     advance: 'click',
     clickTarget: 'reveal-eye',
     clickPrompt: 'Click the eye on pcUSD',

@@ -1,6 +1,7 @@
 {
-  "epoch": 1,
-  "verifiedAt": "2026-08-24",
+  "epoch": 2,
+  "status": "pending-deploy",
+  "verifiedAt": null,
   "cluster": "devnet",
   "rpcEndpoint": "https://api.devnet.solana.com",
   "encryptGrpcUrl": "https://pre-alpha-dev-1.encrypt.ika-network.net:443",
@@ -9,42 +10,51 @@
   "fheTypeU64": 4,
   "programs": {
     "encrypt": "4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8",
-    "pcToken": "3QaXJefrZ5K2nPWUfQwhbqUVMc1azSZT4MzU2hTfQV8C",
-    "pcSwap": "C3FYxXn15CMfimyrPU5FdwjyuMwvjVuB9zUPShL9eEMv"
+    "pcToken": "3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ",
+    "pcSwap": "BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD"
+  },
+  "source": {
+    "repository": "https://github.com/inkwell-finance/encrypt-pre-alpha",
+    "branch": "inkwell/epoch-2-hardening",
+    "commit": "3a49223bba94afdd1ae89a785db3210dbfd9aab6",
+    "pcTokenSoSha256": "0ea7cc2a39129963bfab2cd6f503017a53b13cd75e6b2d0c8db7c191c7c446f1",
+    "pcSwapSoSha256": "225b472590d89219724b5a66619c2b21154d848a689d4e97e01f658fc60cc9ed",
+    "reproducible": false
   },
   "sides": {
     "USDC": {
       "decimals": 6,
-      "splMint": "AHfy9KyJLQMCS6mjcoUvvFgUqKr6HKoywee2mdpBpwa4",
-      "pcMint": "6CXh4GJMSd8d3PAYCqsAYyK25prbTH1LAQiusg1BZkAH",
-      "pcMintAuthority": "G1zjvpQwg9LycZXPCuYN4kxsSNQBMzsXKz9bMz6GkJGD",
-      "vault": "5KDQ5YZbDMregqrWpwkqi4dCRU4yqbSCYFngXgdp5Nep",
-      "vaultAta": "DcBz3thrap7j5QiQA8iaEWZu5p9wfcuz49QU1nFTvs9f"
+      "splMint": null,
+      "pcMint": null,
+      "pcMintAuthority": null,
+      "vault": null,
+      "vaultAta": null
     },
     "DOGE": {
       "decimals": 6,
-      "splMint": "DHoyYsraopt627rYMgaweGYpm3rQkXXGWL6AW3EZpjon",
-      "pcMint": "3pvtAYbteZJWkia5gg8yMSRvFcUfaPjcwoK4LKw274Fn",
-      "pcMintAuthority": "ms9YhtEZPVBdXDwbCswDQc1m7GkrdtiLHF3TzD9SVdH",
-      "vault": "GSTAGfDfEhiCuBpzDpTZwbj2XSyZRwbp1Qtq3qudf61S",
-      "vaultAta": "2hcPj5doJfYm2UwQPo4hGVUAd5jY6zwrcyxqcSaPg5Uh"
+      "splMint": null,
+      "pcMint": null,
+      "pcMintAuthority": null,
+      "vault": null,
+      "vaultAta": null
     }
   },
   "pool": {
-    "address": "4f9qJbkX1jkHgzZMVC8eRfQFuPUokf1hZn7rDsYZezWB",
+    "address": null,
     "sideA": "USDC",
     "sideB": "DOGE",
-    "vaultAccountA": "3mX9fEr4uZDF2mUALxM3aSVVmgdFYXPdotXSkZ9PLhsF",
-    "vaultAccountB": "7BEzSH2GhUVyvxuokrtDG7WdvgDk7hA7CLb73ZCEakRc",
-    "vaultBalanceCtA": "6WXyJ61jV7VW2M5LsrkT4JUzmaJCt3WeSvkTbNbKx96A",
-    "vaultBalanceCtB": "EdhnbDApUHZ4NMYb6gu8KuoKGyi8Z165mcuJbXuRrojx",
-    "reserveCtA": "25ir3Q29HsWsFRxyruzraDJb3seGry25GptzZe8aCuho",
-    "reserveCtB": "JAZB6uVEJMirzUoZqKvGQE59aoYNUsFjpmgpBtpW1caV"
+    "vaultAccountA": null,
+    "vaultAccountB": null,
+    "vaultBalanceCtA": null,
+    "vaultBalanceCtB": null,
+    "reserveCtA": null,
+    "reserveCtB": null
   },
   "layout": {
     "pcAccountBalanceCtOffset": [64, 96],
     "ciphertextDigestOffset": [2, 34],
     "ciphertextVerifiedFlagByte": 99,
-    "encryptConfigFeeVaultOffset": [100, 132]
+    "encryptConfigFeeVaultOffset": [100, 132],
+    "withdrawalReceiptLen": 203
   }
 }

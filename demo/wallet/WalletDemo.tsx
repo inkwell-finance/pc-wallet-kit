@@ -64,7 +64,7 @@ const ANNOTATIONS: Record<Context, { headline: string; points: string[] }> = {
     headline: 'The ramp is the only public step.',
     points: [
       'KYC lives with the issuer, at mint and redeem.',
-      'After settlement, even the issuer can’t read your balance.',
+      'The goal: after settlement, only your viewing key can read your balance (not yet true in pre-alpha).',
     ],
   },
   confirm: {

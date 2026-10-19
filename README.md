@@ -39,8 +39,8 @@ No public faucet yet. Send us the devnet pubkeys you want funded and we drip 1 0
 
 ## Status and what's coming
 
-Everything here targets the currently deployed pre-alpha programs; Encrypt Alpha 1 will wipe devnet state and every address. A packaged SDK (`wrap`/`unwrap`/`transfer`/`revealBalance`/`submitSwap`/`verifySwapOutcome`, typed errors, integration suite) is in progress and will land in this repo.
+**Epoch 2 (2026-10-19)** replaces the epoch 1 programs, which had program-level security holes, with patched builds at new addresses. Wrap and unwrap changed for clients; see [GUIDE.md "What changed in epoch 2"](GUIDE.md#what-changed-in-epoch-2). The epoch 1 addresses still exist on devnet but must not be used. No external audit has been done; this is a devnet preview holding no value. Encrypt Alpha 1 will wipe devnet state and every address. A packaged SDK (`wrap`/`unwrap`/`transfer`/`revealBalance`/`submitSwap`/`verifySwapOutcome`, typed errors, integration suite) is in progress and will land in this repo.
 
 ## License
 
-Vendored Encrypt code: BSD-3-Clause-Clear (see `THIRD-PARTY-NOTICES.md`). Our own files in this repo are provided for partner evaluation on devnet; an open-source license for them is pending review and will be added here. Until then, all rights reserved for the non-vendored files.
+Our own files (`GUIDE.md`, `llms-full.md`, `devnet.json`, `reference/`, `demo/`) are licensed under the [Apache License 2.0](LICENSE). Everything under `vendor/encrypt/` is derived from dWallet Labs' Encrypt and stays under BSD-3-Clause-Clear, including Inkwell's changes to those files (see `THIRD-PARTY-NOTICES.md`). Both licenses allow distribution through app stores and extension stores; the Clear variant grants no patent rights.
