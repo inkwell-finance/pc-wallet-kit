@@ -17,7 +17,7 @@ Everything here is written against the programs that are actually deployed on de
 
 ### What changed in epoch 2
 
-Epoch 1 ran the upstream pc-token / pc-swap examples. Those had program-level holes: wrap credited a client-supplied ciphertext, accounts weren't checked for owner or type, the unwrap steps weren't bound together, the Encrypt program and the pc-token program weren't pinned, and pc-swap's pool wasn't owner-checked. Epoch 2 redeploys patched programs at new addresses, built from `encrypt-pre-alpha` branch `inkwell/epoch-2-hardening` (commit `3a49223`). Each hole has a regression test there that fails on the old build.
+Epoch 1 ran the upstream pc-token / pc-swap examples. Those had program-level holes: wrap credited a client-supplied ciphertext, accounts weren't checked for owner or type, the unwrap steps weren't bound together, the Encrypt program and the pc-token program weren't pinned, and pc-swap's pool wasn't owner-checked. Epoch 2 redeploys patched programs at new addresses, built from `encrypt-pre-alpha` branch `inkwell/epoch-2-hardening` (commit `0055f80`). Each hole has a regression test there that fails on the old build.
 
 For a wallet, only these change:
 
@@ -26,7 +26,7 @@ For a wallet, only these change:
 - **Swap floor:** a swap that misses its floor now refunds the input in the same transaction (upstream `f7f410a`). In epoch 1 the input stayed in the pool.
 - **Mock tokens:** 2 decimals instead of 6, so the 64-bit curve math can't overflow (§2).
 - **Settlement:** wait for the status byte (`data[99] == 1`) as well as a digest change (§8). The epoch 1 client relied on the digest alone, which fires before the executor commits.
-- **Send:** the reference client has a tested `transfer()` (§6).
+- **Send:** the reference client has a `transfer()` (§6), not yet verified end to end on devnet.
 - **Errors:** wrong-owner or wrong-length accounts, a foreign Encrypt program, a wrong caller, aliased accounts and non-canonical bumps are rejected. Custom errors are `0x100`–`0x10E` from pc-token and `0x200`–`0x207` from pc-swap (names in the vendored sources).
 
 Every other instruction keeps its discriminator, data and account order. Every address in §2 is new.
@@ -242,7 +242,7 @@ Steps:
 
 **Semantics:** the program computes `sufficient = from ≥ amount; from' = sufficient ? from − amount : from; to' = sufficient ? to + amount : to`. An insufficient balance is a **successful transaction that moves nothing**. The sender's wallet should compare its cached balance to the amount before sending, and after settlement reveal (§5) to confirm. Do not render "sent" from the signature.
 
-Reference implementation status: the deployed pc-token program supports this and the instruction builder is in the upstream e2e suite (`pc-token/e2e/instructions.ts`, `Transfer`). Reference: `PcSwapClient.transfer()` (`pcSwap.ts`), tested on devnet epoch 2. It onboards a first-time recipient in a separate transaction (sender pays), waits for that account to be Verified, then sends.
+Reference implementation status: the deployed pc-token program supports this and the instruction builder is in the upstream e2e suite (`pc-token/e2e/instructions.ts`, `Transfer`). Reference: `PcSwapClient.transfer()` (`pcSwap.ts`). It onboards a first-time recipient in a separate transaction (sender pays), waits for that account to be Verified, then sends. **Not yet verified end to end:** our devnet test of it hit a dropped executor event (see §8), so treat it as untested until we post a passing run.
 
 ---
 
@@ -257,6 +257,7 @@ Reserves are encrypted, so nobody — including us — can compute an exact quot
 - **Indicative price:** the wallet shows an estimate from a price source *it* trusts (the reference design anchors on Pyth). On the devnet toy pair the pool is seeded 1 : 1 and there is no meaningful external price; use 1.0.
 - **Floor:** the wallet derives `minAmountOut = estimate × (1 − tolerance)` and passes it in as a ciphertext. The curve enforces `amountOut ≥ minAmountOut` *inside the encrypted math*.
 - **Enforcement is silent.** If the floor is violated (or the user's balance is insufficient), the transaction still succeeds. The input is debited into the pool's vault and then refunded in the same transaction, reserves are untouched, and nothing is paid out, so the user's balances end where they started. There is no error and no event. The only way to learn the outcome is to reveal the balance afterwards. (Epoch 1 had no refund: a missed floor kept the user's input. Epoch 2 includes upstream's refund, `f7f410a`.)
+- **Known issue, devnet 2026-10-20:** the executor is not enforcing the floor. In our tests a swap with an unreachable floor still filled at the curve price. The minimum-out input holds the right value, so the comparison inside the swap graph isn't being applied; we're raising it with dWallet Labs. Until it's fixed, don't promise users the floor.
 
 Present this to users as "you will receive at least X, or nothing moves" — not as a firm quote and not as fill-or-fail.
 
@@ -322,7 +323,7 @@ Other things to handle:
 - **Stale balance ciphertext** (all-zero digest): the executor never committed to this account. Wrap will still go through; swap should refuse. Surface it as "your deposit is still settling".
 - **RPC load.** Each settlement wait opens a WebSocket subscription and polls; a swap does two in parallel. The public devnet RPC will 429 you. Use your own provider.
 - **Rent leakage.** Each reveal creates a ciphertext account that isn't reclaimed today (~0.0023 SOL). Swap receipts and unwrap receipts are closed in-flow. This is a pre-alpha wart we've flagged upstream.
-- **Dropped transactions.** The devnet executor occasionally never processes a confirmed transaction (5 of 50 in one of our runs). Its output ciphertexts stay Pending forever, so a settlement wait can time out for good. Show "unknown", never "failed" or "succeeded".
+- **Dropped transactions.** The devnet executor occasionally never processes a confirmed transaction (5 of 50 in one of our runs; 4 of about 30 on 2026-10-20). Its output ciphertexts stay Pending forever, so a settlement wait can time out for good. Show "unknown", never "failed" or "succeeded". When this hits a pool write, the pool stays Pending for everyone; we then publish a replacement pool under a new `epoch`. **Load `devnet.json` at runtime** (e.g. from this repo's raw URL) rather than baking it into a build, so a pool swap doesn't need an app release.
 - **Ciphertexts can be overwritten through Encrypt.** On devnet today, the Encrypt program lets anyone name an existing ciphertext as the output of their own graph. Epoch 2 closes the holes in pc-token / pc-swap, but it can't stop a balance being rewritten through Encrypt directly. It has been reported to dWallet Labs. It's another reason this rail is devnet-only and holds no value.
 - **ACL is coarse.** In pre-alpha Encrypt, "authorized to compute on" equals "authorized to decrypt". Never authorize a balance copy to a key you don't control, and never call `make_public`/`request_decryption` on anything but your own reveal copies.
 

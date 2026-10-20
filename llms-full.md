@@ -1,6 +1,6 @@
 # pc-token / pc-swap — Wallet Integration, LLM-complete bundle (Solana devnet)
 
-> This single file is everything an engineer or coding agent needs to implement wrap, reveal, send, swap and unwrap against the pc-token and pc-swap programs deployed on Solana devnet. Part 1 is the human guide. Part 2 is the verbatim reference source: the browser-tested client, the Encrypt gRPC-web client closure, the upstream instruction builders, and both on-chain programs. Part 3 is the guided mock-wallet demo (UX patterns only; mock data). Devnet epoch 2 (2026-10-19): programs patched for the security holes found in epoch 1; read addresses from devnet.json. Encrypt client pin: `7d34bb1f5889045a21fb428a96dd667aabd78157`; program source pin: `3a49223bba94afdd1ae89a785db3210dbfd9aab6` (branch `inkwell/epoch-2-hardening`). Repository: https://github.com/inkwell-finance/pc-wallet-kit.
+> This single file is everything an engineer or coding agent needs to implement wrap, reveal, send, swap and unwrap against the pc-token and pc-swap programs deployed on Solana devnet. Part 1 is the human guide. Part 2 is the verbatim reference source: the browser-tested client, the Encrypt gRPC-web client closure, the upstream instruction builders, and both on-chain programs. Part 3 is the guided mock-wallet demo (UX patterns only; mock data). Devnet epoch 2 (2026-10-19): programs patched for the security holes found in epoch 1; read addresses from devnet.json. Encrypt client pin: `7d34bb1f5889045a21fb428a96dd667aabd78157`; program source pin: `0055f80ce85de360f52701690b568b1f935a143c` (branch `inkwell/epoch-2-hardening`). Repository: https://github.com/inkwell-finance/pc-wallet-kit.
 >
 > Instructions for an agent: read Part 1 fully first — §1 lists what is NOT true yet (pre-alpha, plaintext, devnet-only, silent no-ops). Implement against the account layouts and discriminators in Part 1; use Part 2 to resolve any ambiguity — the on-chain `lib.rs` files are authoritative over the guide. Do not depend on the `@encrypt.xyz/pre-alpha-solana-client` npm package; vendor the three files in §2.4–2.6 instead and add `@protobuf-ts/runtime`, `@protobuf-ts/runtime-rpc`, `@protobuf-ts/grpcweb-transport` as dependencies. Preserve partial signatures from ephemeral keypairs when the wallet signs. Never report a send or swap as successful from a confirmed signature alone; reveal afterwards.
 
@@ -10,12 +10,16 @@
 
 ## What changed in epoch 2
 
-Epoch 1 ran the upstream pc-token / pc-swap examples. Those had program-level holes: wrap credited a client-supplied ciphertext, accounts weren't checked for owner or type, the unwrap steps weren't bound together, the Encrypt program and the pc-token program weren't pinned, and pc-swap's pool wasn't owner-checked. Epoch 2 redeploys patched programs at new addresses, built from `encrypt-pre-alpha` branch `inkwell/epoch-2-hardening` (commit `3a49223`). Each hole has a regression test there that fails on the old build.
+Epoch 1 ran the upstream pc-token / pc-swap examples. Those had program-level holes: wrap credited a client-supplied ciphertext, accounts weren't checked for owner or type, the unwrap steps weren't bound together, the Encrypt program and the pc-token program weren't pinned, and pc-swap's pool wasn't owner-checked. Epoch 2 redeploys patched programs at new addresses, built from `encrypt-pre-alpha` branch `inkwell/epoch-2-hardening` (commit `0055f80`). Each hole has a regression test there that fails on the old build.
 
 For a wallet, only these change:
 
 - **Wrap (§4):** the amount ciphertext is a fresh keypair you `partialSign`. There is no `createInput` and no verification poll; the program creates the ciphertext from the SPL amount.
 - **Unwrap (§9):** `burnedCt` is a fresh keypair you `partialSign`, created by the program. The receipt is now 203 bytes, so unwrap rent rises slightly. Decryption can be requested once per receipt.
+- **Swap floor:** a swap that misses its floor now refunds the input in the same transaction (upstream `f7f410a`). In epoch 1 the input stayed in the pool.
+- **Mock tokens:** 2 decimals instead of 6, so the 64-bit curve math can't overflow (§2).
+- **Settlement:** wait for the status byte (`data[99] == 1`) as well as a digest change (§8). The epoch 1 client relied on the digest alone, which fires before the executor commits.
+- **Send:** the reference client has a `transfer()` (§6), not yet verified end to end on devnet.
 - **Errors:** wrong-owner or wrong-length accounts, a foreign Encrypt program, a wrong caller, aliased accounts and non-canonical bumps are rejected. Custom errors are `0x100`–`0x10E` from pc-token and `0x200`–`0x207` from pc-swap (names in the vendored sources).
 
 Every other instruction keeps its discriminator, data and account order. Every address in §2 is new.
@@ -65,7 +69,7 @@ Network encryption key (32 bytes, all `0x55`): `Uint8Array(32).fill(0x55)`
 | pc-token | `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ` |
 | pc-swap | `BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD` |
 
-Two mock tokens, both 6 decimals, named USDC and DOGE for demo purposes only. They are test mints we control, worth nothing. Their SPL mints, pc-mints, vaults, the mock-USDC / mock-DOGE pool and its reserve ciphertexts are created when epoch 2 is initialized on devnet. **[pending deploy]** Read every one of them from [`devnet.json`](devnet.json) rather than from this guide. Its `epoch` bumps on every redeploy, so your build can refuse to run against a stale set.
+Two mock tokens, both **2 decimals**, named USDC and DOGE for demo purposes only. They are test mints we control, worth nothing. They use 2 decimals because pc-swap's curve math is 64-bit: `amountIn × 997 × reserveOut` must stay below 2⁶⁴, which 6-decimal reserves of any useful size break. Their SPL mints, pc-mints, vaults, the mock-USDC / mock-DOGE pool and its reserve ciphertexts are created when epoch 2 is initialized on devnet. Read every one of them from [`devnet.json`](devnet.json) rather than from this guide. Its `epoch` bumps on every redeploy, so your build can refuse to run against a stale set.
 
 The epoch 1 addresses (pc-token `3QaXJefr…`, pc-swap `C3FYxXn1…`) still exist on devnet but run the unpatched programs. Don't integrate against them.
 
@@ -87,7 +91,7 @@ The epoch 1 addresses (pc-token `3QaXJefr…`, pc-swap `C3FYxXn1…`) still exis
 ### Account layouts you must read
 
 - **pc-account** (`[b"pc_account", pcMint, owner]`): the balance ciphertext account's pubkey is at `data[64..96]`. You need it for every operation.
-- **Ciphertext account** (owned by Encrypt): `data[2..34]` is the current value digest — it changes whenever the executor commits a new value to that account. `data[99] == 1` means an *input* ciphertext (one you created via `createInput`) has been verified by the executor. This byte is *not* set on ciphertexts produced by computation, which is why settlement is detected by digest change (§8).
+- **Ciphertext account** (owned by Encrypt): `data[2..34]` is the current value digest — it changes whenever the executor commits a new value to that account. `data[99]` is the status: `1` Verified (committed by the executor), `0` Pending. Encrypt rewrites the digest and sets status `0` the moment a transaction writes the ciphertext, then the executor sets `1` when it commits. This applies to `createInput` ciphertexts, graph outputs and copies alike. Settlement is therefore digest changed **and** status `1` (§8); a digest change alone fires immediately.
 - **Encrypt config** (`[b"encrypt_config"]`): `data[100..132]` is the fee vault pubkey used by `create_deposit`. If it equals the System Program, pass the payer instead.
 
 ---
@@ -196,7 +200,7 @@ Steps:
    viewer.publicKey        ro     (new authorized key)
    … Encrypt tail (payer = owner, signer)
    ```
-4. Wait for the executor. There is no verification flag to poll on a computed ciphertext; the reference client sleeps 2 s. If the read in step 6 returns empty, retry after another delay.
+4. Wait for the copy to be Verified (`viewCt` `data[99] == 1`). Before step 3, also check that the balance itself is Verified: copying a balance whose last write is still Pending returns the old value.
 5. Build the read message (BCS): `chain: u8 = 0` ‖ `ciphertext_id: bytes(32)` (ULEB128 length-prefixed) ‖ `reencryption_key: bytes` (empty, length-prefixed) ‖ `epoch: u64 LE = 0`. Sign it with ed25519 using `viewer`'s 32-byte seed. The wallet does **not** sign this — it's the ephemeral key's job, which is exactly why the ephemeral key exists (wallets refuse to sign arbitrary bytes).
 6. `readCiphertext({ message, signature, signer: viewer.publicKey })` → `{ value, fheType, digest }`. Decode `value` as u64 LE. **Treat a response shorter than 8 bytes as an error, not as zero** — the reference client has that footgun.
 
@@ -231,7 +235,7 @@ Steps:
 
 **Semantics:** the program computes `sufficient = from ≥ amount; from' = sufficient ? from − amount : from; to' = sufficient ? to + amount : to`. An insufficient balance is a **successful transaction that moves nothing**. The sender's wallet should compare its cached balance to the amount before sending, and after settlement reveal (§5) to confirm. Do not render "sent" from the signature.
 
-Reference implementation status: the deployed pc-token program supports this and the instruction builder is in the upstream e2e suite (`pc-token/e2e/instructions.ts`, `Transfer`). Our web demo does not expose a send button yet, so there is no browser-tested TypeScript for this exact flow; the closest tested code is the same-shaped `transfer()` in our legacy cold-storage client, which also demonstrates recipient auto-onboarding. We will ship a tested `transfer()` in the SDK (§9).
+Reference implementation status: the deployed pc-token program supports this and the instruction builder is in the upstream e2e suite (`pc-token/e2e/instructions.ts`, `Transfer`). Reference: `PcSwapClient.transfer()` (`pcSwap.ts`). It onboards a first-time recipient in a separate transaction (sender pays), waits for that account to be Verified, then sends. **Not yet verified end to end:** our devnet test of it hit a dropped executor event (see §8), so treat it as untested until we post a passing run.
 
 ---
 
@@ -245,7 +249,8 @@ Reserves are encrypted, so nobody — including us — can compute an exact quot
 
 - **Indicative price:** the wallet shows an estimate from a price source *it* trusts (the reference design anchors on Pyth). On the devnet toy pair the pool is seeded 1 : 1 and there is no meaningful external price; use 1.0.
 - **Floor:** the wallet derives `minAmountOut = estimate × (1 − tolerance)` and passes it in as a ciphertext. The curve enforces `amountOut ≥ minAmountOut` *inside the encrypted math*.
-- **Enforcement is silent.** If the floor is violated (or the user's balance is insufficient), the transaction still succeeds; both `finalIn` and `finalOut` collapse to zero, reserves are untouched, and the user's balances don't change. There is no error and no event. The only way to learn the outcome is to reveal the balance afterwards.
+- **Enforcement is silent.** If the floor is violated (or the user's balance is insufficient), the transaction still succeeds. The input is debited into the pool's vault and then refunded in the same transaction, reserves are untouched, and nothing is paid out, so the user's balances end where they started. There is no error and no event. The only way to learn the outcome is to reveal the balance afterwards. (Epoch 1 had no refund: a missed floor kept the user's input. Epoch 2 includes upstream's refund, `f7f410a`.)
+- **Known issue, devnet 2026-10-20:** the executor is not enforcing the floor. In our tests a swap with an unreachable floor still filled at the curve price. The minimum-out input holds the right value, so the comparison inside the swap graph isn't being applied; we're raising it with dWallet Labs. Until it's fixed, don't promise users the floor.
 
 Present this to users as "you will receive at least X, or nothing moves" — not as a firm quote and not as fill-or-fail.
 
@@ -300,7 +305,7 @@ Reference: `PcSwapClient.swap()` (`pcSwap.ts`); on-chain math in `pc-swap/pinocc
 The chain confirms in ~400 ms; the encrypted arithmetic lands whenever the executor processes it. Every flow therefore has two phases, and your UI must show both:
 
 - **Submitted** — signature confirmed. SPL has moved (wrap/unwrap), the intent is recorded.
-- **Settled** — the executor committed a new value to the affected ciphertext(s). Detected by the balance CT's `data[2..34]` digest changing versus a snapshot taken before sending. Use `onAccountChange` plus a slow poll (reference: 1.5 s, 90 s cap) — subscriptions alone are unreliable on devnet.
+- **Settled** — the executor committed a new value to the affected ciphertext(s). Detected by the balance CT's `data[2..34]` digest differing from a snapshot taken before sending **and** `data[99] == 1`. Don't use the digest alone: it changes as soon as the transaction lands, while the value is still Pending, and a reveal or a follow-up transaction at that point reads the old value. Use `onAccountChange` plus a slow poll (reference: 1.5 s, 90 s cap) — subscriptions alone are unreliable on devnet.
 - **Unknown outcome** — after settlement of a send or swap you still don't know whether it was a fill or a no-op until you reveal.
 
 Timing observed on devnet: `createInput` verification 1–10 s; wrap/swap settlement 2–30 s typical, up to a minute or more under load; reveal read available ~2 s after the ViewBalance tx. Budget for the worst case and never block the wallet's main thread on it.
@@ -311,7 +316,7 @@ Other things to handle:
 - **Stale balance ciphertext** (all-zero digest): the executor never committed to this account. Wrap will still go through; swap should refuse. Surface it as "your deposit is still settling".
 - **RPC load.** Each settlement wait opens a WebSocket subscription and polls; a swap does two in parallel. The public devnet RPC will 429 you. Use your own provider.
 - **Rent leakage.** Each reveal creates a ciphertext account that isn't reclaimed today (~0.0023 SOL). Swap receipts and unwrap receipts are closed in-flow. This is a pre-alpha wart we've flagged upstream.
-- **Dropped transactions.** The devnet executor occasionally never processes a confirmed transaction (5 of 50 in one of our runs). Its output ciphertexts stay Pending forever, so a settlement wait can time out for good. Show "unknown", never "failed" or "succeeded".
+- **Dropped transactions.** The devnet executor occasionally never processes a confirmed transaction (5 of 50 in one of our runs; 4 of about 30 on 2026-10-20). Its output ciphertexts stay Pending forever, so a settlement wait can time out for good. Show "unknown", never "failed" or "succeeded". When this hits a pool write, the pool stays Pending for everyone; we then publish a replacement pool under a new `epoch`. **Load `devnet.json` at runtime** (e.g. from this repo's raw URL) rather than baking it into a build, so a pool swap doesn't need an app release.
 - **Ciphertexts can be overwritten through Encrypt.** On devnet today, the Encrypt program lets anyone name an existing ciphertext as the output of their own graph. Epoch 2 closes the holes in pc-token / pc-swap, but it can't stop a balance being rewritten through Encrypt directly. It has been reported to dWallet Labs. It's another reason this rail is devnet-only and holds no value.
 - **ACL is coarse.** In pre-alpha Encrypt, "authorized to compute on" equals "authorized to decrypt". Never authorize a balance copy to a key you don't control, and never call `make_public`/`request_decryption` on anything but your own reveal copies.
 
@@ -554,6 +559,7 @@ function buildCreateDepositIx(EP: PublicKey, payer: PublicKey, configPda: Public
 function buildInitializeAccountIx(
   pcTokenProgram: PublicKey, accountPda: PublicKey, accountBump: number, mint: PublicKey,
   owner: PublicKey, balanceCt: PublicKey, encAccts: EncryptCpiAccts, cpiAuthority: PublicKey, cpiBump: number,
+  payer: PublicKey = owner, // a sender can pay to onboard a recipient (owner is read-only here)
 ): TransactionInstruction {
   return new TransactionInstruction({
     programId: pcTokenProgram,
@@ -563,6 +569,26 @@ function buildInitializeAccountIx(
       { pubkey: mint, isSigner: false, isWritable: false },
       { pubkey: owner, isSigner: false, isWritable: false },
       { pubkey: balanceCt, isSigner: true, isWritable: true },
+      ...encryptCpiAccountsList(encAccts, pcTokenProgram, cpiAuthority, payer),
+    ],
+  });
+}
+
+/** pc-token Transfer (disc 3): moves `amountCt` from one pc-account to another, or nothing if the sender is short. */
+function buildTransferIx(
+  pcTokenProgram: PublicKey, fromAccount: PublicKey, toAccount: PublicKey, fromBalanceCt: PublicKey,
+  toBalanceCt: PublicKey, amountCt: PublicKey, owner: PublicKey, encAccts: EncryptCpiAccts,
+  cpiAuthority: PublicKey, cpiBump: number,
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: pcTokenProgram,
+    data: Buffer.from([3, cpiBump]),
+    keys: [
+      { pubkey: fromAccount, isSigner: false, isWritable: false },
+      { pubkey: toAccount, isSigner: false, isWritable: false },
+      { pubkey: fromBalanceCt, isSigner: false, isWritable: true },
+      { pubkey: toBalanceCt, isSigner: false, isWritable: true },
+      { pubkey: amountCt, isSigner: false, isWritable: true },
       ...encryptCpiAccountsList(encAccts, pcTokenProgram, cpiAuthority, owner),
     ],
   });
@@ -702,22 +728,32 @@ export class PcSwapClient {
    * this to gate wrap() — only swap(), where zero digest means swap_graph would read
    * garbage.
    */
+  /** Stale = never committed (all-zero digest) or a write still Pending (status 0). */
   private async isBalCtStale(balCt: PublicKey): Promise<boolean> {
     const info = await this.opts.connection.getAccountInfo(balCt, 'confirmed');
-    if (!info || info.data.length < 34) return false;
+    if (!info || info.data.length < 100) return false;
     const buf = info.data as Buffer;
+    if (buf[99] !== 1) return true;
     for (let i = 2; i < 34; i++) {
       if (buf[i] !== 0) return false;
     }
     return true;
   }
 
-  private async waitForExecutorCommit(_ct: PublicKey, delayMs = 2000): Promise<void> {
-    // Devnet mock executor doesn't flip byte 99 on FHE-graph outputs, so we can't poll
-    // for verification. The executor processes ExecuteGraph events asynchronously after
-    // the on-chain TX confirms; a small fixed delay gives it time to commit before the
-    // subsequent gRPC readCiphertext call.
-    await new Promise(r => setTimeout(r, delayMs));
+  /**
+   * Wait until a ciphertext is Verified (status byte 99 == 1). Encrypt sets it to 0
+   * (Pending) when a transaction writes the ciphertext and the executor sets it to 1 when
+   * it commits the value. This holds for graph outputs and copies as well as createInput
+   * ciphertexts (re-checked on devnet epoch 2, 2026-10-20).
+   */
+  private async waitForVerified(ct: PublicKey, timeoutMs = 60_000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const info = await this.opts.connection.getAccountInfo(ct, 'confirmed');
+      if (info && info.data.length >= 100 && info.data[99] === 1) return true;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    return false;
   }
 
   /**
@@ -861,6 +897,71 @@ export class PcSwapClient {
   }
 
   /**
+   * Send pc-tokens to another wallet (GUIDE §6). Onboards a first-time recipient (the
+   * sender pays for their pc-account) in its own transaction first, then sends the transfer.
+   *
+   * Resolves once the executor has committed the sender's new balance. That does NOT mean
+   * the amount moved: an insufficient balance is a successful transaction that moves
+   * nothing. Reveal the sender's balance afterwards to tell a send from a no-op.
+   */
+  async transfer({ wallet, to, side, amount }: { wallet: PublicKey; to: PublicKey; side: Side; amount: bigint }): Promise<PcSwapResult> {
+    try {
+      if (to.equals(wallet)) return { ok: false, reason: 'unsupported', detail: 'Cannot send to yourself.' };
+      if (amount <= 0n) return { ok: false, reason: 'unsupported', detail: 'Amount must be positive.' };
+      const cfg = this.sideConfig(side);
+      const enc = deriveEncryptAccts(this.opts.encryptProgramId, wallet);
+      const [cpiAuth, cpiBump] = derivePcTokenCpiAuthority(this.opts.pcTokenProgramId);
+
+      const from = await this.getUserPcAccountInfo(wallet, side);
+      if (!from.balCt) return { ok: false, reason: 'unsupported', detail: `No ${side} balance — wrap first.` };
+      if (await this.isBalCtStale(from.balCt)) {
+        return { ok: false, reason: 'rpc_error', detail: `Your ${side} balance is still settling; try again shortly.` };
+      }
+
+      // First-time recipient: create their pc-account, paid and signed by the sender.
+      const recipient = await this.getUserPcAccountInfo(to, side);
+      let toBalCt = recipient.balCt;
+      if (!toBalCt) {
+        const balKp = Keypair.generate();
+        const setupIxs: TransactionInstruction[] = [];
+        const depositIx = await this.maybeBuildCreateDepositIx(wallet, enc);
+        if (depositIx) setupIxs.push(depositIx);
+        setupIxs.push(buildInitializeAccountIx(this.opts.pcTokenProgramId, recipient.acct, recipient.bump, cfg.pcMint, to, balKp.publicKey, enc, cpiAuth, cpiBump, wallet));
+        const setupTx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ...setupIxs);
+        setupTx.feePayer = wallet;
+        setupTx.recentBlockhash = (await this.opts.connection.getLatestBlockhash('confirmed')).blockhash;
+        setupTx.partialSign(balKp);
+        await this.opts.signAndSend(setupTx);
+        // Keep account creation and the first graph that writes it apart (GUIDE §3).
+        if (!(await this.waitForVerified(balKp.publicKey, 60_000))) {
+          return { ok: false, reason: 'rpc_error', detail: 'Recipient account created, but the executor has not committed it yet; try the send again shortly.' };
+        }
+        toBalCt = balKp.publicKey;
+      }
+
+      const amountCt = await this.encryptInputCt(amount, this.opts.pcTokenProgramId);
+      await this.pollVerifiedInputs([amountCt]);
+
+      const previousDigest = await this.snapshotBalCtDigest(from.balCt);
+      const tx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 450_000 }),
+        buildTransferIx(this.opts.pcTokenProgramId, from.acct, recipient.acct, from.balCt, toBalCt, amountCt, wallet, enc, cpiAuth, cpiBump),
+      );
+      tx.feePayer = wallet;
+      tx.recentBlockhash = (await this.opts.connection.getLatestBlockhash('confirmed')).blockhash;
+      const signature = await this.opts.signAndSend(tx);
+
+      const committed = await this.waitForBalCtCommitted(from.balCt, previousDigest, 90_000);
+      if (!committed) {
+        return { ok: false, reason: 'rpc_error', detail: `Send confirmed on-chain (sig ${signature.slice(0, 16)}…) but the Encrypt executor hasn't committed it within 90s. Check your balance in a moment.` };
+      }
+      return { ok: true, signature };
+    } catch (err) {
+      return errToResult(err);
+    }
+  }
+
+  /**
    * Snapshot the current ciphertext digest (bytes 2..34) of a bal CT, or null if the
    * account doesn't exist yet. Used as a "before" reference so we can detect when the
    * executor commits a new value (digest *changes*, not just becomes non-zero — repeat
@@ -873,11 +974,12 @@ export class PcSwapClient {
   }
 
   /**
-   * Wait for the executor to commit an FHE-graph result to bal CT. Watches for the digest
-   * to differ from the snapshot (or to become non-zero if the account didn't exist before).
+   * Wait for the executor to commit an FHE-graph result to bal CT: the digest differs from
+   * the snapshot (or is non-zero if the account didn't exist before) AND the status byte
+   * (99) is 1, Verified. The digest alone is not enough: Encrypt rewrites it when the
+   * transaction lands, with status 0 (Pending), before the executor commits anything.
    * Uses WebSocket onAccountChange for near-real-time signal, with a polling fallback for
-   * the initial state and timeout enforcement. Byte 99 is *not* a reliable signal here —
-   * the current devnet executor only flips it on createInput CTs, not on graph outputs.
+   * the initial state and timeout enforcement.
    */
   private waitForBalCtCommitted(
     balCt: PublicKey,
@@ -886,8 +988,9 @@ export class PcSwapClient {
   ): Promise<boolean> {
     const conn = this.opts.connection;
     const matchesCommit = (data: Buffer | Uint8Array): boolean => {
-      if (data.length < 34) return false;
+      if (data.length < 100) return false;
       const buf = data instanceof Buffer ? data : Buffer.from(data);
+      if (buf[99] !== 1) return false; // still Pending
       const current = buf.subarray(2, 34);
       if (previousDigest === null) {
         for (let i = 0; i < 32; i++) if (current[i] !== 0) return true;
@@ -1057,6 +1160,11 @@ export class PcSwapClient {
       const userInfo = await this.getUserPcAccountInfo(wallet, side);
       if (!userInfo.balCt) return { ok: false, reason: 'unsupported', detail: `No ${side} balance — wrap first.` };
 
+      // Copying a Pending balance reads the old value. Wait for the last write to settle.
+      if (!(await this.waitForVerified(userInfo.balCt, 90_000))) {
+        return { ok: false, reason: 'rpc_error', detail: `Your ${side} balance is still settling; try again shortly.` };
+      }
+
       const enc = deriveEncryptAccts(this.opts.encryptProgramId, wallet);
       const [cpiAuth, cpiBump] = derivePcTokenCpiAuthority(this.opts.pcTokenProgramId);
 
@@ -1070,7 +1178,9 @@ export class PcSwapClient {
       tx.partialSign(viewCt);
 
       await this.opts.signAndSend(tx);
-      await this.waitForExecutorCommit(viewCt.publicKey);
+      if (!(await this.waitForVerified(viewCt.publicKey))) {
+        return { ok: false, reason: 'rpc_error', detail: 'The executor has not committed the balance copy yet; try again shortly.' };
+      }
 
       const message = encodeReadCiphertextMessage({
         chain: 0, ciphertextIdentifier: viewCt.publicKey.toBytes(),
@@ -3802,16 +3912,19 @@ fn distinct(accts: &[&AccountView]) -> ProgramResult {
 
 // ── FHE Graphs ──
 
-/// Constant-product swap with 0.3% fee + slippage check.
+/// Constant-product swap with 0.3% fee + slippage check + refund.
 ///
 /// `receipt` is pc-token's TransferWithReceipt output: it equals `amount_in`
 /// on a successful user→vault deposit, exactly `0` on insufficient balance.
 /// All reserve and payout updates are functions of `receipt`, never of the
 /// user-supplied `amount_in` directly — so a lying user produces `receipt=0`
-/// and every output is 0/no-op uniformly. `amount_in_ct` itself is passed
-/// to pc-token (not pc-swap), so swap_graph cannot read it — `min_amount_out`
-/// (always pc-swap-authorized) provides the typed zero source. On slippage
-/// failure both `final_in` and `final_out` collapse to 0.
+/// and every output is 0/no-op uniformly.
+///
+/// `refund = receipt - final_in` is `0` on a successful swap and `receipt`
+/// on slippage rejection. The dispatch CPIs `pc-token::transfer(vault→user)`
+/// for `refund` after the graph, so a slipped deposit is returned to the
+/// user instead of being stranded in the pool vault. `min_amount_out`
+/// (always pc-swap-authorized) provides the typed zero source.
 #[encrypt_fn]
 fn swap_graph(
     reserve_in: EUint64,
@@ -3827,19 +3940,22 @@ fn swap_graph(
     let zero = min_amount_out - min_amount_out;
     let final_in = if slip_ok { receipt } else { zero };
     let final_out = if slip_ok { amount_out } else { zero };
+    let refund = receipt - final_in;
     let new_reserve_in = reserve_in + final_in;
     let new_reserve_out = reserve_out - final_out;
-    (final_in, final_out, new_reserve_in, new_reserve_out)
+    (refund, final_out, new_reserve_in, new_reserve_out)
 }
 
-/// Add liquidity — updates reserves, total supply, and user LP balance.
+/// Add liquidity — atomic-deposit gated, with per-side refunds.
 ///
 /// `receipt_a` / `receipt_b` are pc-token TransferWithReceipt outputs from
 /// the two user→vault deposits (= amount on success, 0 on insufficient).
-/// Reserves and LP updates are functions of the receipts only; if either
-/// deposit no-ops the reserves and LP supply stay consistent.
+/// Reserves, supply, and LP only update when BOTH receipts are non-zero
+/// AND the resulting `lp_to_mint` is positive (`settled = both_ok && lp_ok`).
+/// On any other case nothing settles and `refund_a` / `refund_b` carry the
+/// untouched receipts back to the user via vault→user CPIs in the dispatch.
 ///
-/// First deposit: lp = receipt_a. Subsequent: proportional.
+/// First deposit: lp = receipt_a. Subsequent: proportional via min(lp_a, lp_b).
 #[encrypt_fn]
 fn add_liquidity_graph(
     reserve_a: EUint64,
@@ -3849,8 +3965,6 @@ fn add_liquidity_graph(
     receipt_b: EUint64,
     user_lp: EUint64,
 ) -> (EUint64, EUint64, EUint64, EUint64, EUint64, EUint64) {
-    let new_reserve_a = reserve_a + receipt_a;
-    let new_reserve_b = reserve_b + receipt_b;
     let initial_lp = receipt_a;
     let lp_from_a = (receipt_a * total_supply) / (reserve_a + 1);
     let lp_from_b = (receipt_b * total_supply) / (reserve_b + 1);
@@ -3860,16 +3974,32 @@ fn add_liquidity_graph(
         lp_from_a
     };
     let is_subsequent = total_supply >= 1;
-    let lp_to_mint = if is_subsequent {
+    let lp_to_mint_proposed = if is_subsequent {
         subsequent_lp
     } else {
         initial_lp
     };
+
+    // Atomic-deposit gate: settle only when both sides deposited AND minted.
+    let pa_ok = receipt_a >= 1;
+    let pb_ok = receipt_b >= 1;
+    let both_ok = if pa_ok { pb_ok } else { pa_ok };
+    let lp_ok = lp_to_mint_proposed >= 1;
+    let settled = if both_ok { lp_ok } else { both_ok };
+
+    let zero = total_supply - total_supply;
+    let final_a = if settled { receipt_a } else { zero };
+    let final_b = if settled { receipt_b } else { zero };
+    let lp_to_mint = if settled { lp_to_mint_proposed } else { zero };
+    let refund_a = receipt_a - final_a;
+    let refund_b = receipt_b - final_b;
+    let new_reserve_a = reserve_a + final_a;
+    let new_reserve_b = reserve_b + final_b;
     let new_total_supply = total_supply + lp_to_mint;
     let new_user_lp = user_lp + lp_to_mint;
     (
-        receipt_a,
-        receipt_b,
+        refund_a,
+        refund_b,
         new_reserve_a,
         new_reserve_b,
         new_total_supply,
@@ -4058,6 +4188,55 @@ fn cpi_pc_token_transfer<'a>(
         Some(seeds) => invoke_signed(&ix, views, &[Signer::from(seeds)]),
         None => invoke_signed(&ix, views, &[]),
     }
+}
+
+/// Build the metas/views and CPI a single pc-token::transfer in one call.
+/// Lives in its own function so the metas+views arrays (~600B) get their
+/// own stack frame instead of accumulating in the caller — keeps the
+/// dispatch handlers under Solana's 4 KB frame limit.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn pool_signed_transfer<'a>(
+    from_acct: &'a AccountView,
+    to_acct: &'a AccountView,
+    from_bal_ct: &'a AccountView,
+    to_bal_ct: &'a AccountView,
+    amt_ct: &'a AccountView,
+    ep: &'a AccountView,
+    cfg: &'a AccountView,
+    dep: &'a AccountView,
+    pc_token_cpi_auth: &'a AccountView,
+    pc_token_program: &'a AccountView,
+    nk: &'a AccountView,
+    pool_acct: &'a AccountView,
+    evt: &'a AccountView,
+    sys: &'a AccountView,
+    token_cpi_bump: u8,
+    pool_seeds: &[Seed],
+) -> ProgramResult {
+    let (metas, views) = pc_token_transfer_accounts(
+        from_acct,
+        to_acct,
+        from_bal_ct,
+        to_bal_ct,
+        amt_ct,
+        ep,
+        cfg,
+        dep,
+        pc_token_cpi_auth,
+        pc_token_program,
+        nk,
+        pool_acct,
+        evt,
+        sys,
+    );
+    cpi_pc_token_transfer(
+        pc_token_program,
+        token_cpi_bump,
+        &metas,
+        &views,
+        Some(pool_seeds),
+    )
 }
 
 /// Build pc-token::TransferWithReceipt account list.
@@ -4710,14 +4889,15 @@ fn swap(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramR
     );
     cpi_pc_token_transfer_with_receipt(pc_token_program, token_cpi_bump, &metas, &views)?;
 
-    // 2) Run swap math against the receipt. final_in and final_out are 0 if
+    // 2) Run swap math against the receipt. min_out_ct slot becomes `refund`
+    //    (= 0 on success, = receipt on slippage rejection). final_out is 0 if
     //    the deposit no-op'd or slippage failed; reserves move in lockstep.
     ctx.swap_graph(
         reserve_in_ct,
         reserve_out_ct,
         receipt_ct,
         min_out_ct,
-        min_out_ct,     // out 0: final_in (overwrites min_out_ct, used only for tracing)
+        min_out_ct,     // out 0: refund (re-tags min_out_ct, paid back below)
         amt_out_ct,     // out 1: final_out
         reserve_in_ct,  // out 2: new_reserve_in
         reserve_out_ct, // out 3: new_reserve_out
@@ -4756,7 +4936,32 @@ fn swap(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramR
         Some(&pool_seeds),
     )?;
 
-    // 4) Reclaim receipt rent. close_ciphertext signs as pc-swap's CPI auth and
+    // 4) Refund: vault_in → user. min_out_ct now holds the refund amount
+    //    (= 0 on a successful swap, = receipt when slippage rejected the swap).
+    //    Pays back the deposit so a slipped swap doesn't strand pc-tokens
+    //    in the pool's vault. Authorized to pc-swap currently — re-tag to
+    //    pc-token so the transfer CPI's input auth check passes.
+    ctx.transfer_ciphertext(min_out_ct, pc_token_program)?;
+    pool_signed_transfer(
+        vault_in_acct,
+        user_in_acct,
+        vault_in_bal_ct,
+        user_in_bal_ct,
+        min_out_ct,
+        ep,
+        cfg,
+        dep,
+        pc_token_cpi_auth,
+        pc_token_program,
+        nk,
+        pool_acct,
+        evt,
+        sys,
+        token_cpi_bump,
+        &pool_seeds,
+    )?;
+
+    // 5) Reclaim receipt rent. close_ciphertext signs as pc-swap's CPI auth and
     //    requires receipt.authorized == pc-swap, which holds (set by step 1).
     ctx.close_ciphertext(receipt_ct, payer)?;
     Ok(())
@@ -4910,8 +5115,9 @@ fn add_liquidity(program_id: &Address, accounts: &[AccountView], data: &[u8]) ->
     );
     cpi_pc_token_transfer_with_receipt(pc_token_program, token_cpi_bump, &metas, &views)?;
 
-    // 3) Run liquidity math against the receipts. Reserves, supply, and LP all
-    //    update from receipts only — lying inputs collapse to 0 uniformly.
+    // 3) Run liquidity math against the receipts. Reserves, supply, and LP
+    //    only update when both deposits settled; otherwise refund_a / refund_b
+    //    carry the truthful side back unchanged.
     ctx.add_liquidity_graph(
         ra_ct,
         rb_ct,
@@ -4919,15 +5125,62 @@ fn add_liquidity(program_id: &Address, accounts: &[AccountView], data: &[u8]) ->
         receipt_a_ct,
         receipt_b_ct,
         user_lp_ct,
-        amt_a_ct,   // out 0: final_a (overwrites amt_a_ct, for tracing)
-        amt_b_ct,   // out 1: final_b
+        amt_a_ct,   // out 0: refund_a (re-tags amt_a_ct)
+        amt_b_ct,   // out 1: refund_b (re-tags amt_b_ct)
         ra_ct,      // out 2: new_reserve_a
         rb_ct,      // out 3: new_reserve_b
         ts_ct,      // out 4: new_total_supply
         user_lp_ct, // out 5: new_user_lp
     )?;
 
-    // 4) Reclaim receipt rent.
+    // 4) Refunds: vault → user for each side (= 0 on a fully-settled deposit,
+    //    = receipt when the deposit didn't settle). amt_*_ct are already
+    //    pc-token-authorized from steps 1 / 2, so no transfer_ciphertext needed.
+    let bb = [pool.bump];
+    let pool_seeds = [
+        Seed::from(b"pc_pool" as &[u8]),
+        Seed::from(pool.mint_a.as_ref()),
+        Seed::from(pool.mint_b.as_ref()),
+        Seed::from(&bb),
+    ];
+    pool_signed_transfer(
+        vault_a_acct,
+        user_a_acct,
+        vault_a_bal_ct,
+        user_a_bal_ct,
+        amt_a_ct,
+        ep,
+        cfg,
+        dep,
+        pc_token_cpi_auth,
+        pc_token_program,
+        nk,
+        pool_acct,
+        evt,
+        sys,
+        token_cpi_bump,
+        &pool_seeds,
+    )?;
+    pool_signed_transfer(
+        vault_b_acct,
+        user_b_acct,
+        vault_b_bal_ct,
+        user_b_bal_ct,
+        amt_b_ct,
+        ep,
+        cfg,
+        dep,
+        pc_token_cpi_auth,
+        pc_token_program,
+        nk,
+        pool_acct,
+        evt,
+        sys,
+        token_cpi_bump,
+        &pool_seeds,
+    )?;
+
+    // 5) Reclaim receipt rent.
     ctx.close_ciphertext(receipt_a_ct, payer)?;
     ctx.close_ciphertext(receipt_b_ct, payer)?;
     Ok(())
@@ -5160,8 +5413,8 @@ mod tests {
     fn swap_basic() {
         // reserve_in, reserve_out, receipt, min_out
         let r = run_mock(swap_graph, &[1000, 2000, 100, 0], &[T, T, T, T]);
-        // r = (final_in, final_out, new_reserve_in, new_reserve_out)
-        assert_eq!(r[0], 100, "final_in == receipt on success");
+        // r = (refund, final_out, new_reserve_in, new_reserve_out)
+        assert_eq!(r[0], 0, "refund == 0 on success");
         assert!(r[1] > 0, "final_out > 0");
         assert_eq!(r[2], 1100);
         assert!(r[2] * r[3] >= 1000 * 2000);
@@ -5169,17 +5422,17 @@ mod tests {
     #[test]
     fn swap_slippage() {
         let r = run_mock(swap_graph, &[1000, 2000, 100, 999], &[T, T, T, T]);
-        assert_eq!(r[0], 0);
-        assert_eq!(r[1], 0);
-        assert_eq!(r[2], 1000);
-        assert_eq!(r[3], 2000);
+        assert_eq!(r[0], 100, "refund == receipt on slippage rejection");
+        assert_eq!(r[1], 0, "final_out collapses to 0");
+        assert_eq!(r[2], 1000, "reserve_in untouched");
+        assert_eq!(r[3], 2000, "reserve_out untouched");
     }
     #[test]
     fn swap_lying_user_receipt_zero() {
         // user claims amount_in=100 but transfer no-op'd → receipt=0.
-        // Reserves must stay 1000/2000, payout must be 0.
+        // Reserves must stay 1000/2000, payout must be 0, refund must be 0.
         let r = run_mock(swap_graph, &[1000, 2000, 0, 0], &[T, T, T, T]);
-        assert_eq!(r[0], 0, "final_in collapses with receipt=0");
+        assert_eq!(r[0], 0, "refund == 0 (nothing was deposited)");
         assert_eq!(r[1], 0, "final_out collapses with receipt=0");
         assert_eq!(r[2], 1000, "reserve_in untouched");
         assert_eq!(r[3], 2000, "reserve_out untouched");
@@ -5193,9 +5446,9 @@ mod tests {
             &[0, 0, 0, 1000, 2000, 0],
             &[T, T, T, T, T, T],
         );
-        // r = (final_a, final_b, new_reserve_a, new_reserve_b, new_total_supply, new_user_lp)
-        assert_eq!(r[0], 1000);
-        assert_eq!(r[1], 2000);
+        // r = (refund_a, refund_b, new_reserve_a, new_reserve_b, new_total_supply, new_user_lp)
+        assert_eq!(r[0], 0, "refund_a == 0 on settled deposit");
+        assert_eq!(r[1], 0, "refund_b == 0 on settled deposit");
         assert_eq!(r[2], 1000);
         assert_eq!(r[3], 2000);
         assert_eq!(r[4], 1000, "supply = receipt_a on first deposit");
@@ -5209,8 +5462,8 @@ mod tests {
             &[1000, 2000, supply, 500, 1000, 0],
             &[T, T, T, T, T, T],
         );
-        assert_eq!(r[0], 500);
-        assert_eq!(r[1], 1000);
+        assert_eq!(r[0], 0, "refund_a == 0");
+        assert_eq!(r[1], 0, "refund_b == 0");
         assert_eq!(r[2], 1500);
         assert_eq!(r[3], 3000);
         assert!(r[4] > supply);
@@ -5219,18 +5472,36 @@ mod tests {
     #[test]
     fn add_liq_lying_a_receipt_zero() {
         // user lied about token A: receipt_a=0, receipt_b=1000.
-        // Reserves should advance only for B, LP should be 0 (lp_from_a=0 dominates min).
+        // Atomic-deposit gate: settled=false → reserves untouched, supply
+        // unchanged, full B-side receipt refunded.
         let supply = 1000u128;
         let r = run_mock(
             add_liquidity_graph,
             &[1000, 2000, supply, 0, 1000, 0],
             &[T, T, T, T, T, T],
         );
-        assert_eq!(r[0], 0);
-        assert_eq!(r[1], 1000);
-        assert_eq!(r[2], 1000);
-        assert_eq!(r[3], 3000);
-        assert_eq!(r[4], supply, "supply unchanged when lp_to_mint=0");
+        assert_eq!(r[0], 0, "refund_a == 0 (nothing deposited)");
+        assert_eq!(r[1], 1000, "refund_b == receipt_b (truthful side returned)");
+        assert_eq!(r[2], 1000, "reserve_a untouched");
+        assert_eq!(r[3], 2000, "reserve_b untouched (no donation)");
+        assert_eq!(r[4], supply, "supply unchanged");
+        assert_eq!(r[5], 0);
+    }
+    #[test]
+    fn add_liq_lying_b_receipt_zero() {
+        // user lied about token B: receipt_a=1000, receipt_b=0.
+        // Symmetric to lying-A — A side gets refunded, no donation.
+        let supply = 1000u128;
+        let r = run_mock(
+            add_liquidity_graph,
+            &[1000, 2000, supply, 1000, 0, 0],
+            &[T, T, T, T, T, T],
+        );
+        assert_eq!(r[0], 1000, "refund_a == receipt_a (truthful side returned)");
+        assert_eq!(r[1], 0, "refund_b == 0");
+        assert_eq!(r[2], 1000, "reserve_a untouched");
+        assert_eq!(r[3], 2000, "reserve_b untouched");
+        assert_eq!(r[4], supply);
         assert_eq!(r[5], 0);
     }
 

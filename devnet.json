@@ -1,7 +1,7 @@
 {
   "epoch": 2,
-  "status": "pending-deploy",
-  "verifiedAt": null,
+  "status": "deployed",
+  "verifiedAt": "2026-10-20",
   "cluster": "devnet",
   "rpcEndpoint": "https://api.devnet.solana.com",
   "encryptGrpcUrl": "https://pre-alpha-dev-1.encrypt.ika-network.net:443",
@@ -16,45 +16,58 @@
   "source": {
     "repository": "https://github.com/inkwell-finance/encrypt-pre-alpha",
     "branch": "inkwell/epoch-2-hardening",
-    "commit": "3a49223bba94afdd1ae89a785db3210dbfd9aab6",
+    "commit": "0055f80ce85de360f52701690b568b1f935a143c",
     "pcTokenSoSha256": "0ea7cc2a39129963bfab2cd6f503017a53b13cd75e6b2d0c8db7c191c7c446f1",
-    "pcSwapSoSha256": "225b472590d89219724b5a66619c2b21154d848a689d4e97e01f658fc60cc9ed",
+    "pcSwapSoSha256": "0e1704703525b675c6c2efa9c829a84584a034e9f97ce6c553382ceb8015f721",
     "reproducible": false
   },
   "sides": {
     "USDC": {
-      "decimals": 6,
-      "splMint": null,
-      "pcMint": null,
-      "pcMintAuthority": null,
-      "vault": null,
-      "vaultAta": null
+      "decimals": 2,
+      "splMint": "3DPnZhfi9BrqeEUi5mABNqyvfBmDzp828ouKSgxMi4Ub",
+      "pcMint": "55vZLCwUfy9DN9k4g9enbrB73beNsxrVFnTy8Ju3Kksg",
+      "pcMintAuthority": "4FvhKtdYBwSU9J6iTxn2uoa8e6YhX9ZCwfa1KHxLETsP",
+      "vault": "EWTW7CHSVCNqnEikcxXJzFtGGZSRUevdfPfzavYc1bfX",
+      "vaultAta": "CyYDjJ9yFiyfCVwFSj8k9NevWE6dnbPHP5TxdfDP9d7T"
     },
     "DOGE": {
-      "decimals": 6,
-      "splMint": null,
-      "pcMint": null,
-      "pcMintAuthority": null,
-      "vault": null,
-      "vaultAta": null
+      "decimals": 2,
+      "splMint": "7THEZPKDXA2gUSEC85o1hzq61ZkiRxbNWS2NmwTiBKd8",
+      "pcMint": "CnxKcnpGDYDBF2KS3g3N922FBewxN8bocEHSfKuumQ7a",
+      "pcMintAuthority": "Dhy8eKPyqUo6NkpXjaxe52JVKSYqe9N5MSyrUjnB2Brr",
+      "vault": "99Nmn5LqqauoetsKmS9j7n7BJEtw52pr6jJds21JYsKi",
+      "vaultAta": "27KTqVoWiZwciaLw3KthShinLJoEhXpKDrV9ueagpB6d"
     }
   },
   "pool": {
-    "address": null,
+    "address": "9Y1EQPYReofVzVwjdhDmrW9HDuJQqvCiA2ZVLS8ufr9m",
     "sideA": "USDC",
     "sideB": "DOGE",
-    "vaultAccountA": null,
-    "vaultAccountB": null,
-    "vaultBalanceCtA": null,
-    "vaultBalanceCtB": null,
-    "reserveCtA": null,
-    "reserveCtB": null
+    "vaultAccountA": "89heERXQwtpPn1aBXWnJdwtTpkaE5JhzYKjd2wRMm3Gg",
+    "vaultAccountB": "6ALuiz7o3C3Zrvt3Aukc9VdwwmfRUB6jEFMTd6XTt42X",
+    "vaultBalanceCtA": "CJbH1QaZ6YvJL4eh52EEKjtYpAQdqcVfMbYwQYHcN5t9",
+    "vaultBalanceCtB": "877tcqUynNYNkwQZeWHWcyKWhAJHgehmG9ukLqs9A1Mi",
+    "reserveCtA": "GQw1vJmsPJm5gTtSKEUJQhP3kQDQ8NPyaPHUqPMo2Zgd",
+    "reserveCtB": "28JTAfYTdr52mVzGuhkR2ViCowDudTADz7zYkJpQFh9C"
   },
   "layout": {
-    "pcAccountBalanceCtOffset": [64, 96],
-    "ciphertextDigestOffset": [2, 34],
+    "pcAccountBalanceCtOffset": [
+      64,
+      96
+    ],
+    "ciphertextDigestOffset": [
+      2,
+      34
+    ],
     "ciphertextVerifiedFlagByte": 99,
-    "encryptConfigFeeVaultOffset": [100, 132],
+    "encryptConfigFeeVaultOffset": [
+      100,
+      132
+    ],
     "withdrawalReceiptLen": 203
-  }
+  },
+  "knownIssues": [
+    "Swap floor (minAmountOut) is not enforced by the devnet executor as of 2026-10-20; being raised with dWallet Labs.",
+    "The devnet executor drops some transactions; a dropped write leaves its ciphertexts Pending forever. A dropped pool write stalls that pool; we will publish a replacement pool under a new epoch."
+  ]
 }
