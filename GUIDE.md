@@ -23,6 +23,10 @@ For a wallet, only these change:
 
 - **Wrap (§4):** the amount ciphertext is a fresh keypair you `partialSign`. There is no `createInput` and no verification poll; the program creates the ciphertext from the SPL amount.
 - **Unwrap (§9):** `burnedCt` is a fresh keypair you `partialSign`, created by the program. The receipt is now 203 bytes, so unwrap rent rises slightly. Decryption can be requested once per receipt.
+- **Swap floor:** a swap that misses its floor now refunds the input in the same transaction (upstream `f7f410a`). In epoch 1 the input stayed in the pool.
+- **Mock tokens:** 2 decimals instead of 6, so the 64-bit curve math can't overflow (§2).
+- **Settlement:** wait for the status byte (`data[99] == 1`) as well as a digest change (§8). The epoch 1 client relied on the digest alone, which fires before the executor commits.
+- **Send:** the reference client has a tested `transfer()` (§6).
 - **Errors:** wrong-owner or wrong-length accounts, a foreign Encrypt program, a wrong caller, aliased accounts and non-canonical bumps are rejected. Custom errors are `0x100`–`0x10E` from pc-token and `0x200`–`0x207` from pc-swap (names in the vendored sources).
 
 Every other instruction keeps its discriminator, data and account order. Every address in §2 is new.
@@ -72,7 +76,7 @@ Network encryption key (32 bytes, all `0x55`): `Uint8Array(32).fill(0x55)`
 | pc-token | `3kjJEx6G1XdrtixFg9f8eGRAyzW5QmhsJQq6qCUZYhXZ` |
 | pc-swap | `BqJMtWQYiis1264KqBN3wssNqTofK5RuP67hkZYvb4SD` |
 
-Two mock tokens, both 6 decimals, named USDC and DOGE for demo purposes only. They are test mints we control, worth nothing. Their SPL mints, pc-mints, vaults, the mock-USDC / mock-DOGE pool and its reserve ciphertexts are created when epoch 2 is initialized on devnet. **[pending deploy]** Read every one of them from [`devnet.json`](devnet.json) rather than from this guide. Its `epoch` bumps on every redeploy, so your build can refuse to run against a stale set.
+Two mock tokens, both **2 decimals**, named USDC and DOGE for demo purposes only. They are test mints we control, worth nothing. They use 2 decimals because pc-swap's curve math is 64-bit: `amountIn × 997 × reserveOut` must stay below 2⁶⁴, which 6-decimal reserves of any useful size break. Their SPL mints, pc-mints, vaults, the mock-USDC / mock-DOGE pool and its reserve ciphertexts are created when epoch 2 is initialized on devnet. Read every one of them from [`devnet.json`](devnet.json) rather than from this guide. Its `epoch` bumps on every redeploy, so your build can refuse to run against a stale set.
 
 The epoch 1 addresses (pc-token `3QaXJefr…`, pc-swap `C3FYxXn1…`) still exist on devnet but run the unpatched programs. Don't integrate against them.
 
@@ -94,7 +98,7 @@ The epoch 1 addresses (pc-token `3QaXJefr…`, pc-swap `C3FYxXn1…`) still exis
 ### Account layouts you must read
 
 - **pc-account** (`[b"pc_account", pcMint, owner]`): the balance ciphertext account's pubkey is at `data[64..96]`. You need it for every operation.
-- **Ciphertext account** (owned by Encrypt): `data[2..34]` is the current value digest — it changes whenever the executor commits a new value to that account. `data[99] == 1` means an *input* ciphertext (one you created via `createInput`) has been verified by the executor. This byte is *not* set on ciphertexts produced by computation, which is why settlement is detected by digest change (§8).
+- **Ciphertext account** (owned by Encrypt): `data[2..34]` is the current value digest — it changes whenever the executor commits a new value to that account. `data[99]` is the status: `1` Verified (committed by the executor), `0` Pending. Encrypt rewrites the digest and sets status `0` the moment a transaction writes the ciphertext, then the executor sets `1` when it commits. This applies to `createInput` ciphertexts, graph outputs and copies alike. Settlement is therefore digest changed **and** status `1` (§8); a digest change alone fires immediately.
 - **Encrypt config** (`[b"encrypt_config"]`): `data[100..132]` is the fee vault pubkey used by `create_deposit`. If it equals the System Program, pass the payer instead.
 
 ---
@@ -203,7 +207,7 @@ Steps:
    viewer.publicKey        ro     (new authorized key)
    … Encrypt tail (payer = owner, signer)
    ```
-4. Wait for the executor. There is no verification flag to poll on a computed ciphertext; the reference client sleeps 2 s. If the read in step 6 returns empty, retry after another delay.
+4. Wait for the copy to be Verified (`viewCt` `data[99] == 1`). Before step 3, also check that the balance itself is Verified: copying a balance whose last write is still Pending returns the old value.
 5. Build the read message (BCS): `chain: u8 = 0` ‖ `ciphertext_id: bytes(32)` (ULEB128 length-prefixed) ‖ `reencryption_key: bytes` (empty, length-prefixed) ‖ `epoch: u64 LE = 0`. Sign it with ed25519 using `viewer`'s 32-byte seed. The wallet does **not** sign this — it's the ephemeral key's job, which is exactly why the ephemeral key exists (wallets refuse to sign arbitrary bytes).
 6. `readCiphertext({ message, signature, signer: viewer.publicKey })` → `{ value, fheType, digest }`. Decode `value` as u64 LE. **Treat a response shorter than 8 bytes as an error, not as zero** — the reference client has that footgun.
 
@@ -238,7 +242,7 @@ Steps:
 
 **Semantics:** the program computes `sufficient = from ≥ amount; from' = sufficient ? from − amount : from; to' = sufficient ? to + amount : to`. An insufficient balance is a **successful transaction that moves nothing**. The sender's wallet should compare its cached balance to the amount before sending, and after settlement reveal (§5) to confirm. Do not render "sent" from the signature.
 
-Reference implementation status: the deployed pc-token program supports this and the instruction builder is in the upstream e2e suite (`pc-token/e2e/instructions.ts`, `Transfer`). Our web demo does not expose a send button yet, so there is no browser-tested TypeScript for this exact flow; the closest tested code is the same-shaped `transfer()` in our legacy cold-storage client, which also demonstrates recipient auto-onboarding. We will ship a tested `transfer()` in the SDK (§9).
+Reference implementation status: the deployed pc-token program supports this and the instruction builder is in the upstream e2e suite (`pc-token/e2e/instructions.ts`, `Transfer`). Reference: `PcSwapClient.transfer()` (`pcSwap.ts`), tested on devnet epoch 2. It onboards a first-time recipient in a separate transaction (sender pays), waits for that account to be Verified, then sends.
 
 ---
 
@@ -252,7 +256,7 @@ Reserves are encrypted, so nobody — including us — can compute an exact quot
 
 - **Indicative price:** the wallet shows an estimate from a price source *it* trusts (the reference design anchors on Pyth). On the devnet toy pair the pool is seeded 1 : 1 and there is no meaningful external price; use 1.0.
 - **Floor:** the wallet derives `minAmountOut = estimate × (1 − tolerance)` and passes it in as a ciphertext. The curve enforces `amountOut ≥ minAmountOut` *inside the encrypted math*.
-- **Enforcement is silent.** If the floor is violated (or the user's balance is insufficient), the transaction still succeeds; both `finalIn` and `finalOut` collapse to zero, reserves are untouched, and the user's balances don't change. There is no error and no event. The only way to learn the outcome is to reveal the balance afterwards.
+- **Enforcement is silent.** If the floor is violated (or the user's balance is insufficient), the transaction still succeeds. The input is debited into the pool's vault and then refunded in the same transaction, reserves are untouched, and nothing is paid out, so the user's balances end where they started. There is no error and no event. The only way to learn the outcome is to reveal the balance afterwards. (Epoch 1 had no refund: a missed floor kept the user's input. Epoch 2 includes upstream's refund, `f7f410a`.)
 
 Present this to users as "you will receive at least X, or nothing moves" — not as a firm quote and not as fill-or-fail.
 
@@ -307,7 +311,7 @@ Reference: `PcSwapClient.swap()` (`pcSwap.ts`); on-chain math in `pc-swap/pinocc
 The chain confirms in ~400 ms; the encrypted arithmetic lands whenever the executor processes it. Every flow therefore has two phases, and your UI must show both:
 
 - **Submitted** — signature confirmed. SPL has moved (wrap/unwrap), the intent is recorded.
-- **Settled** — the executor committed a new value to the affected ciphertext(s). Detected by the balance CT's `data[2..34]` digest changing versus a snapshot taken before sending. Use `onAccountChange` plus a slow poll (reference: 1.5 s, 90 s cap) — subscriptions alone are unreliable on devnet.
+- **Settled** — the executor committed a new value to the affected ciphertext(s). Detected by the balance CT's `data[2..34]` digest differing from a snapshot taken before sending **and** `data[99] == 1`. Don't use the digest alone: it changes as soon as the transaction lands, while the value is still Pending, and a reveal or a follow-up transaction at that point reads the old value. Use `onAccountChange` plus a slow poll (reference: 1.5 s, 90 s cap) — subscriptions alone are unreliable on devnet.
 - **Unknown outcome** — after settlement of a send or swap you still don't know whether it was a fill or a no-op until you reveal.
 
 Timing observed on devnet: `createInput` verification 1–10 s; wrap/swap settlement 2–30 s typical, up to a minute or more under load; reveal read available ~2 s after the ViewBalance tx. Budget for the worst case and never block the wallet's main thread on it.

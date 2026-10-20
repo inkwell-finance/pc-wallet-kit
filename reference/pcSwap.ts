@@ -167,6 +167,7 @@ function buildCreateDepositIx(EP: PublicKey, payer: PublicKey, configPda: Public
 function buildInitializeAccountIx(
   pcTokenProgram: PublicKey, accountPda: PublicKey, accountBump: number, mint: PublicKey,
   owner: PublicKey, balanceCt: PublicKey, encAccts: EncryptCpiAccts, cpiAuthority: PublicKey, cpiBump: number,
+  payer: PublicKey = owner, // a sender can pay to onboard a recipient (owner is read-only here)
 ): TransactionInstruction {
   return new TransactionInstruction({
     programId: pcTokenProgram,
@@ -176,6 +177,26 @@ function buildInitializeAccountIx(
       { pubkey: mint, isSigner: false, isWritable: false },
       { pubkey: owner, isSigner: false, isWritable: false },
       { pubkey: balanceCt, isSigner: true, isWritable: true },
+      ...encryptCpiAccountsList(encAccts, pcTokenProgram, cpiAuthority, payer),
+    ],
+  });
+}
+
+/** pc-token Transfer (disc 3): moves `amountCt` from one pc-account to another, or nothing if the sender is short. */
+function buildTransferIx(
+  pcTokenProgram: PublicKey, fromAccount: PublicKey, toAccount: PublicKey, fromBalanceCt: PublicKey,
+  toBalanceCt: PublicKey, amountCt: PublicKey, owner: PublicKey, encAccts: EncryptCpiAccts,
+  cpiAuthority: PublicKey, cpiBump: number,
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: pcTokenProgram,
+    data: Buffer.from([3, cpiBump]),
+    keys: [
+      { pubkey: fromAccount, isSigner: false, isWritable: false },
+      { pubkey: toAccount, isSigner: false, isWritable: false },
+      { pubkey: fromBalanceCt, isSigner: false, isWritable: true },
+      { pubkey: toBalanceCt, isSigner: false, isWritable: true },
+      { pubkey: amountCt, isSigner: false, isWritable: true },
       ...encryptCpiAccountsList(encAccts, pcTokenProgram, cpiAuthority, owner),
     ],
   });
@@ -315,22 +336,32 @@ export class PcSwapClient {
    * this to gate wrap() — only swap(), where zero digest means swap_graph would read
    * garbage.
    */
+  /** Stale = never committed (all-zero digest) or a write still Pending (status 0). */
   private async isBalCtStale(balCt: PublicKey): Promise<boolean> {
     const info = await this.opts.connection.getAccountInfo(balCt, 'confirmed');
-    if (!info || info.data.length < 34) return false;
+    if (!info || info.data.length < 100) return false;
     const buf = info.data as Buffer;
+    if (buf[99] !== 1) return true;
     for (let i = 2; i < 34; i++) {
       if (buf[i] !== 0) return false;
     }
     return true;
   }
 
-  private async waitForExecutorCommit(_ct: PublicKey, delayMs = 2000): Promise<void> {
-    // Devnet mock executor doesn't flip byte 99 on FHE-graph outputs, so we can't poll
-    // for verification. The executor processes ExecuteGraph events asynchronously after
-    // the on-chain TX confirms; a small fixed delay gives it time to commit before the
-    // subsequent gRPC readCiphertext call.
-    await new Promise(r => setTimeout(r, delayMs));
+  /**
+   * Wait until a ciphertext is Verified (status byte 99 == 1). Encrypt sets it to 0
+   * (Pending) when a transaction writes the ciphertext and the executor sets it to 1 when
+   * it commits the value. This holds for graph outputs and copies as well as createInput
+   * ciphertexts (re-checked on devnet epoch 2, 2026-10-20).
+   */
+  private async waitForVerified(ct: PublicKey, timeoutMs = 60_000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const info = await this.opts.connection.getAccountInfo(ct, 'confirmed');
+      if (info && info.data.length >= 100 && info.data[99] === 1) return true;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    return false;
   }
 
   /**
@@ -474,6 +505,71 @@ export class PcSwapClient {
   }
 
   /**
+   * Send pc-tokens to another wallet (GUIDE §6). Onboards a first-time recipient (the
+   * sender pays for their pc-account) in its own transaction first, then sends the transfer.
+   *
+   * Resolves once the executor has committed the sender's new balance. That does NOT mean
+   * the amount moved: an insufficient balance is a successful transaction that moves
+   * nothing. Reveal the sender's balance afterwards to tell a send from a no-op.
+   */
+  async transfer({ wallet, to, side, amount }: { wallet: PublicKey; to: PublicKey; side: Side; amount: bigint }): Promise<PcSwapResult> {
+    try {
+      if (to.equals(wallet)) return { ok: false, reason: 'unsupported', detail: 'Cannot send to yourself.' };
+      if (amount <= 0n) return { ok: false, reason: 'unsupported', detail: 'Amount must be positive.' };
+      const cfg = this.sideConfig(side);
+      const enc = deriveEncryptAccts(this.opts.encryptProgramId, wallet);
+      const [cpiAuth, cpiBump] = derivePcTokenCpiAuthority(this.opts.pcTokenProgramId);
+
+      const from = await this.getUserPcAccountInfo(wallet, side);
+      if (!from.balCt) return { ok: false, reason: 'unsupported', detail: `No ${side} balance — wrap first.` };
+      if (await this.isBalCtStale(from.balCt)) {
+        return { ok: false, reason: 'rpc_error', detail: `Your ${side} balance is still settling; try again shortly.` };
+      }
+
+      // First-time recipient: create their pc-account, paid and signed by the sender.
+      const recipient = await this.getUserPcAccountInfo(to, side);
+      let toBalCt = recipient.balCt;
+      if (!toBalCt) {
+        const balKp = Keypair.generate();
+        const setupIxs: TransactionInstruction[] = [];
+        const depositIx = await this.maybeBuildCreateDepositIx(wallet, enc);
+        if (depositIx) setupIxs.push(depositIx);
+        setupIxs.push(buildInitializeAccountIx(this.opts.pcTokenProgramId, recipient.acct, recipient.bump, cfg.pcMint, to, balKp.publicKey, enc, cpiAuth, cpiBump, wallet));
+        const setupTx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ...setupIxs);
+        setupTx.feePayer = wallet;
+        setupTx.recentBlockhash = (await this.opts.connection.getLatestBlockhash('confirmed')).blockhash;
+        setupTx.partialSign(balKp);
+        await this.opts.signAndSend(setupTx);
+        // Keep account creation and the first graph that writes it apart (GUIDE §3).
+        if (!(await this.waitForVerified(balKp.publicKey, 60_000))) {
+          return { ok: false, reason: 'rpc_error', detail: 'Recipient account created, but the executor has not committed it yet; try the send again shortly.' };
+        }
+        toBalCt = balKp.publicKey;
+      }
+
+      const amountCt = await this.encryptInputCt(amount, this.opts.pcTokenProgramId);
+      await this.pollVerifiedInputs([amountCt]);
+
+      const previousDigest = await this.snapshotBalCtDigest(from.balCt);
+      const tx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 450_000 }),
+        buildTransferIx(this.opts.pcTokenProgramId, from.acct, recipient.acct, from.balCt, toBalCt, amountCt, wallet, enc, cpiAuth, cpiBump),
+      );
+      tx.feePayer = wallet;
+      tx.recentBlockhash = (await this.opts.connection.getLatestBlockhash('confirmed')).blockhash;
+      const signature = await this.opts.signAndSend(tx);
+
+      const committed = await this.waitForBalCtCommitted(from.balCt, previousDigest, 90_000);
+      if (!committed) {
+        return { ok: false, reason: 'rpc_error', detail: `Send confirmed on-chain (sig ${signature.slice(0, 16)}…) but the Encrypt executor hasn't committed it within 90s. Check your balance in a moment.` };
+      }
+      return { ok: true, signature };
+    } catch (err) {
+      return errToResult(err);
+    }
+  }
+
+  /**
    * Snapshot the current ciphertext digest (bytes 2..34) of a bal CT, or null if the
    * account doesn't exist yet. Used as a "before" reference so we can detect when the
    * executor commits a new value (digest *changes*, not just becomes non-zero — repeat
@@ -486,11 +582,12 @@ export class PcSwapClient {
   }
 
   /**
-   * Wait for the executor to commit an FHE-graph result to bal CT. Watches for the digest
-   * to differ from the snapshot (or to become non-zero if the account didn't exist before).
+   * Wait for the executor to commit an FHE-graph result to bal CT: the digest differs from
+   * the snapshot (or is non-zero if the account didn't exist before) AND the status byte
+   * (99) is 1, Verified. The digest alone is not enough: Encrypt rewrites it when the
+   * transaction lands, with status 0 (Pending), before the executor commits anything.
    * Uses WebSocket onAccountChange for near-real-time signal, with a polling fallback for
-   * the initial state and timeout enforcement. Byte 99 is *not* a reliable signal here —
-   * the current devnet executor only flips it on createInput CTs, not on graph outputs.
+   * the initial state and timeout enforcement.
    */
   private waitForBalCtCommitted(
     balCt: PublicKey,
@@ -499,8 +596,9 @@ export class PcSwapClient {
   ): Promise<boolean> {
     const conn = this.opts.connection;
     const matchesCommit = (data: Buffer | Uint8Array): boolean => {
-      if (data.length < 34) return false;
+      if (data.length < 100) return false;
       const buf = data instanceof Buffer ? data : Buffer.from(data);
+      if (buf[99] !== 1) return false; // still Pending
       const current = buf.subarray(2, 34);
       if (previousDigest === null) {
         for (let i = 0; i < 32; i++) if (current[i] !== 0) return true;
@@ -670,6 +768,11 @@ export class PcSwapClient {
       const userInfo = await this.getUserPcAccountInfo(wallet, side);
       if (!userInfo.balCt) return { ok: false, reason: 'unsupported', detail: `No ${side} balance — wrap first.` };
 
+      // Copying a Pending balance reads the old value. Wait for the last write to settle.
+      if (!(await this.waitForVerified(userInfo.balCt, 90_000))) {
+        return { ok: false, reason: 'rpc_error', detail: `Your ${side} balance is still settling; try again shortly.` };
+      }
+
       const enc = deriveEncryptAccts(this.opts.encryptProgramId, wallet);
       const [cpiAuth, cpiBump] = derivePcTokenCpiAuthority(this.opts.pcTokenProgramId);
 
@@ -683,7 +786,9 @@ export class PcSwapClient {
       tx.partialSign(viewCt);
 
       await this.opts.signAndSend(tx);
-      await this.waitForExecutorCommit(viewCt.publicKey);
+      if (!(await this.waitForVerified(viewCt.publicKey))) {
+        return { ok: false, reason: 'rpc_error', detail: 'The executor has not committed the balance copy yet; try again shortly.' };
+      }
 
       const message = encodeReadCiphertextMessage({
         chain: 0, ciphertextIdentifier: viewCt.publicKey.toBytes(),
